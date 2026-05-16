@@ -62,10 +62,10 @@ class VideoStream:
 # ==========================
 # LOAD MODELS
 # ==========================
-model = YOLO("best.pt")
+model = YOLO("models/best.pt")
 model.fuse()
 
-arcface = get_model("w600k_r50.onnx")
+arcface = get_model("models/w600k_r50.onnx")
 arcface.prepare(ctx_id=-1)
 
 # ==========================
