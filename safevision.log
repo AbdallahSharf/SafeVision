@@ -1,0 +1,8 @@
+2026-05-17 10:54:31,688 [INFO] Loading YOLO model: models/best.pt
+2026-05-17 10:54:32,220 [INFO] Loading ArcFace model: models/w600k_r50.onnx
+2026-05-17 10:54:38,686 [INFO] Total faces in DB: 12
+2026-05-17 10:54:40,711 [INFO] VideoStream started.
+2026-05-17 10:54:40,711 [INFO] Starting main loop. DISPLAY_OUTPUT=True
+2026-05-17 10:56:51,915 [INFO] Quit signal received.
+2026-05-17 10:56:51,978 [INFO] VideoStream stopped.
+2026-05-17 10:56:52,004 [INFO] Shutdown complete.
