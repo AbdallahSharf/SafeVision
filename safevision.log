@@ -1,27 +1,58 @@
-2026-05-17 10:54:31,688 [INFO] Loading YOLO model: models/best.pt
-2026-05-17 10:54:32,220 [INFO] Loading ArcFace model: models/w600k_r50.onnx
-2026-05-17 10:54:38,686 [INFO] Total faces in DB: 12
-2026-05-17 10:54:40,711 [INFO] VideoStream started.
-2026-05-17 10:54:40,711 [INFO] Starting main loop. DISPLAY_OUTPUT=True
-2026-05-17 10:56:51,915 [INFO] Quit signal received.
-2026-05-17 10:56:51,978 [INFO] VideoStream stopped.
-2026-05-17 10:56:52,004 [INFO] Shutdown complete.
-2026-05-21 16:49:54,161 [INFO] Loading YOLO model: models/best.pt
-2026-05-21 16:49:54,691 [INFO] Loading ArcFace model: models/w600k_r50.onnx
-2026-05-21 16:50:01,253 [INFO] Total faces in DB: 12
-2026-05-21 16:52:14,593 [INFO] Loading YOLO model: models/best.pt
-2026-05-21 16:52:14,838 [INFO] Loading ArcFace model: models/w600k_r50.onnx
-2026-05-21 16:52:18,010 [INFO] Total faces in DB: 12
-2026-05-21 16:52:19,350 [INFO] VideoStream started.
-2026-05-21 16:52:19,350 [INFO] Starting main loop. DISPLAY_OUTPUT=True
-2026-05-21 16:53:41,734 [INFO] Quit signal received.
-2026-05-21 16:53:41,784 [INFO] VideoStream stopped.
-2026-05-21 16:53:41,807 [INFO] Shutdown complete.
-2026-05-21 17:05:51,249 [INFO] Loading YOLO model: models/best.pt
-2026-05-21 17:05:51,953 [INFO] Loading ArcFace model: models/w600k_r50.onnx
-2026-05-21 17:05:58,870 [INFO] Total faces in DB: 12
-2026-05-21 17:06:00,206 [INFO] VideoStream started.
-2026-05-21 17:06:00,206 [INFO] Starting main loop. DISPLAY_OUTPUT=True
-2026-05-21 17:07:24,459 [INFO] Quit signal received.
-2026-05-21 17:07:24,489 [INFO] VideoStream stopped.
-2026-05-21 17:07:24,553 [INFO] Shutdown complete.
+2026-05-22 02:01:44,277 [INFO] Starting SafeVision API server on port 8080 …
+2026-05-22 02:01:56,649 [INFO] Connected to MongoDB Atlas successfully.
+2026-05-22 02:01:56,732 [INFO] Starting VideoStream …
+2026-05-22 02:01:58,247 [INFO] VideoStream started — rtsp://admin:admin1234@192.168.1.9:554/cam/realmonitor?channel=1&subtype=0
+2026-05-22 02:01:58,250 [INFO] Background processing loop started.
+2026-05-22 02:01:58,250 [INFO] SafeVision API is ready.
+2026-05-22 02:02:06,379 [INFO] Loading YOLO model: models/best.pt
+2026-05-22 02:03:14,855 [INFO] Shutting down …
+2026-05-22 02:03:14,881 [INFO] VideoStream stopped.
+2026-05-22 02:03:14,882 [INFO] Shutdown complete.
+2026-05-22 02:04:03,143 [INFO] Starting SafeVision API server on port 8080 …
+2026-05-22 02:04:13,404 [INFO] Connected to MongoDB Atlas successfully.
+2026-05-22 02:04:13,414 [INFO] Starting VideoStream …
+2026-05-22 02:04:14,709 [INFO] VideoStream started — rtsp://admin:admin1234@192.168.1.9:554/cam/realmonitor?channel=1&subtype=0
+2026-05-22 02:04:14,711 [INFO] Background processing loop started.
+2026-05-22 02:04:14,712 [INFO] SafeVision API is ready.
+2026-05-22 02:04:20,779 [INFO] Loading YOLO model: models/best.pt
+2026-05-22 02:04:21,221 [INFO] YOLO model loaded.
+2026-05-22 02:04:28,378 [INFO] Loading ArcFace model: models/w600k_r50.onnx
+2026-05-22 02:04:35,080 [INFO] ArcFace model loaded.
+2026-05-22 02:08:15,896 [INFO] Starting SafeVision API server on port 8080 …
+2026-05-22 02:08:28,085 [INFO] Connected to MongoDB Atlas successfully.
+2026-05-22 02:08:28,115 [INFO] Starting VideoStream …
+2026-05-22 02:08:29,497 [INFO] VideoStream started — rtsp://admin:admin1234@192.168.1.9:554/cam/realmonitor?channel=1&subtype=0
+2026-05-22 02:08:29,542 [INFO] Background processing loop started.
+2026-05-22 02:08:29,542 [INFO] SafeVision API is ready.
+2026-05-22 02:08:29,545 [INFO] Shutting down …
+2026-05-22 02:08:29,556 [INFO] VideoStream stopped.
+2026-05-22 02:08:29,556 [INFO] Shutdown complete.
+2026-05-22 02:09:37,181 [INFO] Shutting down …
+2026-05-22 02:09:37,220 [INFO] VideoStream stopped.
+2026-05-22 02:09:37,221 [INFO] Shutdown complete.
+2026-05-22 02:09:37,288 [INFO] Background processing loop exited.
+2026-05-22 02:09:41,233 [INFO] Starting SafeVision API server on port 8080 …
+2026-05-22 02:09:51,467 [INFO] Connected to MongoDB Atlas successfully.
+2026-05-22 02:09:51,476 [INFO] Starting VideoStream …
+2026-05-22 02:09:52,765 [INFO] VideoStream started — rtsp://admin:admin1234@192.168.1.9:554/cam/realmonitor?channel=1&subtype=0
+2026-05-22 02:09:52,770 [INFO] Background processing loop started.
+2026-05-22 02:09:52,770 [INFO] SafeVision API is ready.
+2026-05-22 02:10:00,444 [INFO] Loading YOLO model: models/best.pt
+2026-05-22 02:10:00,717 [INFO] YOLO model loaded.
+2026-05-22 02:10:02,820 [INFO] Loading ArcFace model: models/w600k_r50.onnx
+2026-05-22 02:10:08,185 [INFO] ArcFace model loaded.
+2026-05-22 02:10:28,185 [WARNING] Frame queue timed out — stream may be stalled.
+2026-05-22 02:13:40,002 [INFO] Shutting down …
+2026-05-22 02:13:40,038 [INFO] VideoStream stopped.
+2026-05-22 02:13:40,038 [INFO] Shutdown complete.
+2026-05-22 02:13:40,093 [INFO] Background processing loop exited.
+2026-05-22 02:13:47,731 [INFO] Starting SafeVision API server on port 8080 …
+2026-05-22 02:14:01,901 [INFO] Connected to MongoDB Atlas successfully.
+2026-05-22 02:14:01,930 [INFO] Starting VideoStream …
+2026-05-22 02:14:06,979 [INFO] VideoStream started — rtsp://admin:admin1234@192.168.1.9:554/cam/realmonitor?channel=1&subtype=0
+2026-05-22 02:14:06,982 [INFO] Background processing loop started.
+2026-05-22 02:14:06,982 [INFO] SafeVision API is ready.
+2026-05-22 02:14:13,271 [INFO] Loading YOLO model: models/best.pt
+2026-05-22 02:14:13,562 [INFO] YOLO model loaded.
+2026-05-22 02:14:15,829 [INFO] Loading ArcFace model: models/w600k_r50.onnx
+2026-05-22 02:14:19,169 [INFO] ArcFace model loaded.

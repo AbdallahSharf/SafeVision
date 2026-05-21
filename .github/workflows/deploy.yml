@@ -1,0 +1,134 @@
+# =============================================================================
+# SafeVision — CI/CD Pipeline
+# =============================================================================
+# Triggers on every push to main:
+#   1. Builds Docker image
+#   2. Pushes to Google Artifact Registry
+#   3. SSHs into GCE VM to pull & restart the container
+#
+# Required GitHub Secrets:
+#   GCP_PROJECT_ID      — Google Cloud project ID (e.g. safevision-123456)
+#   GCP_SA_KEY          — Service account JSON key (raw JSON text)
+#   GCE_VM_NAME         — Name of the Compute Engine VM (e.g. safevision-vm)
+#   GCE_VM_ZONE         — Zone of the VM (e.g. me-west1-a)
+#   GCP_REGION          — Artifact Registry region (e.g. me-west1)
+#   GCE_SSH_PRIVATE_KEY — Private SSH key to connect to the VM
+# =============================================================================
+
+name: Deploy to Google Compute Engine
+
+on:
+  push:
+    branches: [main]
+
+env:
+  IMAGE_NAME: safevision
+  REPO_NAME: safevision
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout code ──────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true   # Pull Git LFS model files (.pt, .onnx)
+
+      # ── 2. Authenticate with Google Cloud ─────────────────────────────────
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # ── 3. Configure Docker to push to Artifact Registry ──────────────────
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      # ── 4. Build Docker image ─────────────────────────────────────────────
+      - name: Build Docker image
+        run: |
+          FULL_IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}"
+          docker build -t "${FULL_IMAGE}:${{ github.sha }}" -t "${FULL_IMAGE}:latest" .
+
+      # ── 5. Push Docker image ──────────────────────────────────────────────
+      - name: Push Docker image
+        run: |
+          FULL_IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}"
+          docker push "${FULL_IMAGE}:${{ github.sha }}"
+          docker push "${FULL_IMAGE}:latest"
+
+      # ── 6. Get VM's external IP ───────────────────────────────────────────
+      - name: Get VM external IP
+        id: get-ip
+        run: |
+          VM_IP=$(gcloud compute instances describe ${{ secrets.GCE_VM_NAME }} \
+            --zone=${{ secrets.GCE_VM_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
+          echo "vm_ip=${VM_IP}" >> $GITHUB_OUTPUT
+          echo "VM external IP: ${VM_IP}"
+
+      # ── 7. SSH into VM and deploy ─────────────────────────────────────────
+      - name: Deploy to Compute Engine via SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.GCE_SSH_PRIVATE_KEY }}
+          VM_IP: ${{ steps.get-ip.outputs.vm_ip }}
+          FULL_IMAGE: "${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+        run: |
+          # Write the SSH private key to a temp file
+          echo "${SSH_PRIVATE_KEY}" > /tmp/gce_key
+          chmod 600 /tmp/gce_key
+
+          # SSH into the VM and run deployment commands
+          ssh -o StrictHostKeyChecking=no -i /tmp/gce_key "${USER}@${VM_IP}" << EOF
+            # Authenticate Docker to pull from Artifact Registry
+            gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+            # Pull the new image
+            docker pull "${FULL_IMAGE}"
+
+            # Stop and remove old container gracefully
+            docker stop safevision 2>/dev/null || true
+            docker rm safevision 2>/dev/null || true
+
+            # Start new container
+            docker run -d \
+              --name safevision \
+              --restart unless-stopped \
+              -p 8080:8080 \
+              --env-file /opt/safevision/.env \
+              "${FULL_IMAGE}"
+
+            # Clean up old Docker images to save disk space
+            docker image prune -f
+          EOF
+
+          # Clean up key file
+          rm /tmp/gce_key
+
+      # ── 8. Verify the deployment ──────────────────────────────────────────
+      - name: Verify deployment
+        env:
+          VM_IP: ${{ steps.get-ip.outputs.vm_ip }}
+        run: |
+          echo "✅ Deployed! Endpoints:"
+          echo "   Stream: http://${VM_IP}:8080/stream"
+          echo "   Health: http://${VM_IP}:8080/health"
+          echo "   Status: http://${VM_IP}:8080/status"
+
+          # Give the app time to start up (models take ~60s to load)
+          echo "Waiting 90 seconds for models to load..."
+          sleep 90
+
+          # Health check
+          if curl --fail --silent --max-time 10 "http://${VM_IP}:8080/health"; then
+            echo "✅ Health check passed!"
+          else
+            echo "⚠️ Health check pending — check docker logs safevision on the VM"
+          fi
