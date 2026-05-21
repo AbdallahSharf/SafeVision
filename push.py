@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ==========================
 # CONFIG (from env vars with safe defaults)
 # ==========================
-RTSP_URL        = os.environ.get("RTSP_URL", "rtsp://admin:admin1234@192.168.1.6:554/cam/realmonitor?channel=1&subtype=0")
+RTSP_URL        = os.environ.get("RTSP_URL", "rtsp://admin:admin1234@192.168.1.9:554/cam/realmonitor?channel=1&subtype=0")
 DISPLAY_OUTPUT  = os.environ.get("DISPLAY_OUTPUT", "true").lower() == "true"  # set to "false" on headless server
 
 YOLO_MODEL_PATH    = os.environ.get("YOLO_MODEL_PATH",    "models/best.pt")
@@ -48,6 +48,13 @@ HISTORY_LEN    = int(os.environ.get("HISTORY_LEN",    "5"))
 QUEUE_TIMEOUT  = float(os.environ.get("QUEUE_TIMEOUT", "2.0"))
 DB_NUM_CANDIDATES = int(os.environ.get("DB_NUM_CANDIDATES", "100"))
 DB_TOP_K          = int(os.environ.get("DB_TOP_K",          "5"))
+
+# Low-light enhancement
+LOW_LIGHT_ENABLE         = os.environ.get("LOW_LIGHT_ENABLE",         "true").lower() == "true"
+LOW_LIGHT_AUTO_THRESHOLD = int(os.environ.get("LOW_LIGHT_AUTO_THRESHOLD", "80"))   # mean brightness 0-255; enhancement triggers below this
+CLAHE_CLIP_LIMIT         = float(os.environ.get("CLAHE_CLIP_LIMIT",    "3.0"))     # 2.0–4.0; higher = stronger contrast boost
+CLAHE_TILE_SIZE          = int(os.environ.get("CLAHE_TILE_SIZE",       "8"))        # CLAHE grid tile size
+DENOISE_STRENGTH         = int(os.environ.get("DENOISE_STRENGTH",      "7"))        # 0=off, 3–10=light–strong; higher costs FPS
 
 # ==========================
 # STREAM CLASS
@@ -118,6 +125,72 @@ model.fuse()
 logger.info("Loading ArcFace model: %s", ARCFACE_MODEL_PATH)
 arcface = get_model(ARCFACE_MODEL_PATH)
 arcface.prepare(ctx_id=-1)
+
+# ==========================
+# LOW-LIGHT ENHANCEMENT SETUP
+# ==========================
+clahe = cv2.createCLAHE(
+    clipLimit=CLAHE_CLIP_LIMIT,
+    tileGridSize=(CLAHE_TILE_SIZE, CLAHE_TILE_SIZE),
+)
+
+def is_dark(frame: np.ndarray) -> bool:
+    """Return True if frame mean brightness is below the configured threshold."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return float(gray.mean()) < LOW_LIGHT_AUTO_THRESHOLD
+
+def enhance_frame(frame: np.ndarray) -> np.ndarray:
+    """
+    Full-frame low-light enhancement applied BEFORE YOLO detection.
+    Pipeline: optional denoise -> CLAHE on L channel (LAB) -> gamma lift.
+    Only activates when LOW_LIGHT_ENABLE=true AND frame is detected as dark.
+    """
+    if not LOW_LIGHT_ENABLE or not is_dark(frame):
+        return frame
+
+    # Step 1 — fast denoise (skip if DENOISE_STRENGTH=0 to preserve FPS)
+    if DENOISE_STRENGTH > 0:
+        frame = cv2.fastNlMeansDenoisingColored(
+            frame, None,
+            h=DENOISE_STRENGTH,
+            hColor=DENOISE_STRENGTH,
+            templateWindowSize=7,
+            searchWindowSize=21,
+        )
+
+    # Step 2 — CLAHE on L channel of LAB (boosts contrast without blowing out color)
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = clahe.apply(l)
+    frame = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+    # Step 3 — gamma correction to lift shadows (gamma=0.6 -> brighter midtones)
+    inv_gamma = 1.0 / 0.6
+    lut = np.array(
+        [min(255, int((i / 255.0) ** inv_gamma * 255)) for i in range(256)],
+        dtype=np.uint8,
+    )
+    frame = cv2.LUT(frame, lut)
+
+    return frame
+
+def enhance_face(face: np.ndarray) -> np.ndarray:
+    """
+    Face-crop level enhancement applied BEFORE ArcFace embedding.
+    Runs on every face crop when LOW_LIGHT_ENABLE=true — crops can be
+    locally dark even if the overall frame passes the brightness threshold.
+    """
+    if not LOW_LIGHT_ENABLE:
+        return face
+
+    # CLAHE on L channel only — keeps color channels intact for ArcFace
+    lab = cv2.cvtColor(face, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = clahe.apply(l)
+    face = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+    return face
+
 
 # ==========================
 # DB SANITY CHECK
@@ -201,6 +274,7 @@ def main():
                 continue
 
             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+            frame = enhance_frame(frame)  # low-light boost before detection
 
             results = model(frame, conf=YOLO_CONF_THRESHOLD, imgsz=IMGSZ, verbose=False)
 
@@ -229,7 +303,8 @@ def main():
                     if face.size == 0:
                         continue
 
-                    # Preprocessing
+                    # Preprocessing — enhance face crop for low-light conditions
+                    face        = enhance_face(face)
                     face_resized = cv2.resize(face, (FACE_SIZE, FACE_SIZE))
                     face_rgb     = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
 
