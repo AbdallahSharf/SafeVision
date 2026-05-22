@@ -58,7 +58,7 @@ def _processing_loop() -> None:
         result = _processor.process(frame)
 
         # Encode the annotated frame as JPEG for streaming
-        _, jpeg = cv2.imencode(".jpg", result.annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        _, jpeg = cv2.imencode(".jpg", result.annotated, [cv2.IMWRITE_JPEG_QUALITY, settings.STREAM_JPEG_QUALITY])
         with _frame_lock:
             _latest_frame = jpeg.tobytes()
 

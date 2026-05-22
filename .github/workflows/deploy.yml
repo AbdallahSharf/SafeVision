@@ -92,6 +92,7 @@ jobs:
           VM_IP: ${{ steps.get-ip.outputs.vm_ip }}
           FULL_IMAGE: "${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
           GCP_REGION: ${{ env.GCP_REGION }}
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           # Write the SSH private key to a temp file
           echo "${SSH_PRIVATE_KEY}" > /tmp/gce_key
@@ -121,6 +122,13 @@ jobs:
 
             # Aggressively clean up all unused Docker images to save disk space
             docker system prune -af
+
+            # Ensure Tailscale is authenticated and accepts subnet routes.
+            # Uses a reusable pre-auth key so it reconnects automatically after VM reboots.
+            if [ -n "${TAILSCALE_AUTHKEY}" ]; then
+              sudo tailscale up --authkey="${TAILSCALE_AUTHKEY}" --accept-routes --reset || true
+              echo "Tailscale: $(sudo tailscale status --json | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"BackendState\", \"unknown\"))')"
+            fi
           EOF
 
           # Clean up key file

@@ -60,6 +60,10 @@ class FrameProcessor:
         # so that multiple people don't share identity history.
         self._histories: dict[tuple, deque] = {}
 
+        # Frame skipping — YOLO runs every DETECT_EVERY_N frames
+        self._frame_idx: int = 0
+        self._cached_results = []   # cached YOLO result boxes from last detection run
+
         # FPS tracking
         self._frame_count = 0
         self._fps_time = time.time()
@@ -87,15 +91,22 @@ class FrameProcessor:
 
         detected_faces: List[DetectedFace] = []
 
-        results = yolo(
-            frame,
-            conf=settings.YOLO_CONF_THRESHOLD,
-            imgsz=settings.IMGSZ,
-            device=_DEVICE,
-            verbose=False,
-        )
+        # ── Frame skipping ──────────────────────────────────────────────────
+        self._frame_idx += 1
+        run_detection = (self._frame_idx % settings.DETECT_EVERY_N == 0)
 
-        for r in results:
+        if run_detection:
+            self._cached_results = yolo(
+                frame,
+                conf=settings.YOLO_CONF_THRESHOLD,
+                imgsz=settings.IMGSZ,
+                device=_DEVICE,
+                verbose=False,
+            )
+        # Use fresh results if we just ran detection, else reuse cached boxes
+        results_to_use = self._cached_results
+
+        for r in results_to_use:
             boxes = r.boxes
             for i in range(len(boxes)):
                 if float(boxes.conf[i]) < settings.BOX_CONF_THRESHOLD:
@@ -117,6 +128,17 @@ class FrameProcessor:
 
                 face = frame[y1:y2, x1:x2]
                 if face.size == 0:
+                    continue
+
+                # ── Blur quality gate ─────────────────────────────────────────
+                # Laplacian variance: low value = blurry/motion-blurred crop.
+                # Skip ArcFace on blurry crops to avoid polluting history.
+                blur_score = cv2.Laplacian(face, cv2.CV_64F).var()
+                if blur_score < settings.BLUR_THRESHOLD:
+                    logger.debug(
+                        "Skipping blurry face crop (score=%.1f < threshold=%.1f)",
+                        blur_score, settings.BLUR_THRESHOLD,
+                    )
                     continue
 
                 # Pre-process face crop

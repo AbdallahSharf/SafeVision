@@ -84,6 +84,20 @@ class Settings:
     DB_NUM_CANDIDATES: int = int(os.environ.get("DB_NUM_CANDIDATES", "100"))
     DB_TOP_K:          int = int(os.environ.get("DB_TOP_K",          "5"))
 
+    # ── Streaming ─────────────────────────────────────────────────────────
+    # JPEG quality for the MJPEG stream (65 = ~35% smaller than 80, indistinguishable for surveillance)
+    STREAM_JPEG_QUALITY: int = int(os.environ.get("STREAM_JPEG_QUALITY", "65"))
+
+    # ── Face quality gate ─────────────────────────────────────────────────
+    # Laplacian variance below this value means the face crop is too blurry to recognise reliably.
+    # Typical values: crisp face ≈ 200+, motion blur ≈ 20–60.
+    BLUR_THRESHOLD: float = float(os.environ.get("BLUR_THRESHOLD", "80.0"))
+
+    # ── Frame skipping ────────────────────────────────────────────────────
+    # Run YOLO detection only once every N frames; reuse boxes for the rest.
+    # Higher = faster, but bounding boxes lag slightly on fast movement.
+    DETECT_EVERY_N: int = int(os.environ.get("DETECT_EVERY_N", "3"))
+
     # ── Low-light enhancement ─────────────────────────────────────────────
     LOW_LIGHT_ENABLE:         bool  = os.environ.get("LOW_LIGHT_ENABLE", "true").lower() == "true"
     LOW_LIGHT_AUTO_THRESHOLD: int   = int(os.environ.get("LOW_LIGHT_AUTO_THRESHOLD", "80"))
