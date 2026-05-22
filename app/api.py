@@ -47,6 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import faces_collection
 from app.stream import VideoStream
 from app.processor import FrameProcessor
+from app.recognition import reload_thresholds
 
 logger = logging.getLogger("safevision")
 
@@ -318,3 +319,20 @@ async def recent_faces(limit: int = 20):
     if _processor is None:
         return {"faces": []}
     return {"faces": _processor.get_recent_faces(limit=limit)}
+
+
+@app.post("/admin/reload-thresholds", tags=["admin"])
+async def admin_reload_thresholds():
+    """
+    Recompute adaptive per-identity recognition thresholds from current
+    enrollment data.
+
+    Call this after enrolling new faces with ``scripts/enroll_face.py``
+    so the live system picks up the updated calibration without a restart.
+    """
+    try:
+        reload_thresholds()
+        return {"status": "ok", "message": "Thresholds reloaded successfully."}
+    except Exception as exc:
+        logger.error("Failed to reload thresholds: %s", exc)
+        return {"status": "error", "message": str(exc)}
