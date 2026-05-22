@@ -1,8 +1,17 @@
 """
 Frame processing pipeline for SafeVision.
 
-Encapsulates the full detect → recognise → annotate cycle so that both
-the MJPEG streaming endpoint and any future consumers share the same logic.
+Phase 2 refactor: the single process() method is now split into two stages
+so they can run in separate threads (see api.py):
+
+  Stage 1 — detect(frame)
+      Runs YOLO every DETECT_EVERY_N frames (frame skipping from Phase 1).
+      Returns the raw frame + list of bounding boxes.
+
+  Stage 2 — recognize_and_annotate(frame, boxes)
+      Runs the blur gate, ArcFace embedding, MongoDB vector search, and
+      ByteTrack-based temporal smoothing.  Draws bounding boxes and labels.
+      Returns a ProcessedFrame ready for MJPEG encoding.
 """
 
 from app.config import settings
@@ -11,7 +20,7 @@ import time
 import threading
 from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Tuple
 
 import cv2
 import numpy as np
@@ -19,6 +28,7 @@ import numpy as np
 from app.enhancement import enhance_frame, enhance_face
 from app.models_loader import get_yolo, get_arcface, _DEVICE
 from app.recognition import recognize_face
+from app.tracker import FaceTracker
 
 logger = logging.getLogger("safevision")
 
@@ -52,17 +62,22 @@ class FrameProcessor:
     """
     Stateful processor that runs the full SafeVision pipeline on each frame.
 
-    Maintains a short history for temporal smoothing of identity labels.
+    The pipeline is split into two stages for the async 3-thread architecture:
+
+      1. detect(frame) → (preprocessed_frame, boxes)      [YOLO, runs in Thread 2]
+      2. recognize_and_annotate(frame, boxes) → ProcessedFrame  [ArcFace, Thread 3]
     """
 
     def __init__(self):
-        # Per-face temporal smoothing keyed by spatial region (grid cell)
-        # so that multiple people don't share identity history.
-        self._histories: dict[tuple, deque] = {}
+        # ByteTrack-style IoU tracker — gives each face a persistent ID
+        self._tracker = FaceTracker(
+            iou_threshold=0.3,
+            max_lost_frames=8,
+        )
 
         # Frame skipping — YOLO runs every DETECT_EVERY_N frames
         self._frame_idx: int = 0
-        self._cached_results = []   # cached YOLO result boxes from last detection run
+        self._cached_boxes: List[Tuple] = []   # boxes from last YOLO run
 
         # FPS tracking
         self._frame_count = 0
@@ -73,118 +88,162 @@ class FrameProcessor:
         self._recent_faces: deque[DetectedFace] = deque(maxlen=50)
         self._lock = threading.Lock()
 
-    def _get_face_key(self, x1: int, y1: int, x2: int, y2: int) -> tuple:
-        """Map a bounding box to a grid cell for per-face history tracking."""
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
-        # Quantise to 80-pixel grid cells so nearby detections share history
-        return (cx // 80, cy // 80)
+    # ── Stage 1: Detection ────────────────────────────────────────────────
+    def detect(self, raw_frame: np.ndarray) -> Tuple[np.ndarray, List[Tuple]]:
+        """
+        Stage 1 — preprocess + YOLO detection (runs in the detector thread).
 
-    # ── Public API ────────────────────────────────────────────────────────
-    def process(self, frame: np.ndarray) -> ProcessedFrame:
-        """Run the full pipeline on *frame* and return annotated result."""
+        Frame skipping: YOLO runs only once every DETECT_EVERY_N frames.
+        Between YOLO runs the cached boxes from the previous run are reused,
+        so ArcFace still runs every frame on the most recent known positions.
+
+        Parameters
+        ----------
+        raw_frame : np.ndarray
+            Raw BGR frame from the RTSP reader.
+
+        Returns
+        -------
+        (preprocessed_frame, boxes)
+            boxes is a list of (x1, y1, x2, y2) tuples — one per detected face.
+        """
         yolo = get_yolo()
-        arcface = get_arcface()
 
-        frame = cv2.resize(frame, (settings.FRAME_WIDTH, settings.FRAME_HEIGHT))
+        frame = cv2.resize(raw_frame, (settings.FRAME_WIDTH, settings.FRAME_HEIGHT))
         frame = enhance_frame(frame)
 
-        detected_faces: List[DetectedFace] = []
-
-        # ── Frame skipping ──────────────────────────────────────────────────
         self._frame_idx += 1
-        run_detection = (self._frame_idx % settings.DETECT_EVERY_N == 0)
-
-        if run_detection:
-            self._cached_results = yolo(
+        if self._frame_idx % settings.DETECT_EVERY_N == 0:
+            results = yolo(
                 frame,
                 conf=settings.YOLO_CONF_THRESHOLD,
                 imgsz=settings.IMGSZ,
                 device=_DEVICE,
                 verbose=False,
             )
-        # Use fresh results if we just ran detection, else reuse cached boxes
-        results_to_use = self._cached_results
+            h, w = frame.shape[:2]
+            boxes = []
+            for r in results:
+                for i in range(len(r.boxes)):
+                    if float(r.boxes.conf[i]) < settings.BOX_CONF_THRESHOLD:
+                        continue
+                    cls = int(r.boxes.cls[i])
+                    if yolo.names.get(cls, "").lower() != "face":
+                        continue
+                    x1, y1, x2, y2 = map(int, r.boxes.xyxy[i])
+                    # Expand by margin
+                    x1 = max(0, x1 - settings.FACE_MARGIN)
+                    y1 = max(0, y1 - settings.FACE_MARGIN)
+                    x2 = min(w, x2 + settings.FACE_MARGIN)
+                    y2 = min(h, y2 + settings.FACE_MARGIN)
+                    boxes.append((x1, y1, x2, y2))
+            self._cached_boxes = boxes
 
-        for r in results_to_use:
-            boxes = r.boxes
-            for i in range(len(boxes)):
-                if float(boxes.conf[i]) < settings.BOX_CONF_THRESHOLD:
-                    continue
+        return frame, self._cached_boxes
 
-                cls = int(boxes.cls[i])
-                label = yolo.names.get(cls, "")
-                if label.lower() != "face":
-                    continue
+    # ── Stage 2: Recognition + Annotation ────────────────────────────────
+    def recognize_and_annotate(
+        self,
+        frame: np.ndarray,
+        boxes: List[Tuple],
+    ) -> "ProcessedFrame":
+        """
+        Stage 2 — ArcFace recognition + ByteTrack smoothing + annotation.
 
-                x1, y1, x2, y2 = map(int, boxes.xyxy[i])
+        Runs in the recognizer thread, consuming (frame, boxes) pairs
+        produced by the detector thread.
 
-                # Expand bounding box by margin
-                h, w = frame.shape[:2]
-                x1 = max(0, x1 - settings.FACE_MARGIN)
-                y1 = max(0, y1 - settings.FACE_MARGIN)
-                x2 = min(w, x2 + settings.FACE_MARGIN)
-                y2 = min(h, y2 + settings.FACE_MARGIN)
+        Parameters
+        ----------
+        frame : np.ndarray
+            Preprocessed BGR frame (already resized + enhanced).
+        boxes : list of (x1, y1, x2, y2)
+            Face bounding boxes from Stage 1.
 
-                face = frame[y1:y2, x1:x2]
-                if face.size == 0:
-                    continue
+        Returns
+        -------
+        ProcessedFrame
+        """
+        arcface = get_arcface()
+        detected_faces: List[DetectedFace] = []
 
-                # ── Blur quality gate ─────────────────────────────────────────
-                # Laplacian variance: low value = blurry/motion-blurred crop.
-                # Skip ArcFace on blurry crops to avoid polluting history.
-                blur_score = cv2.Laplacian(face, cv2.CV_64F).var()
-                if blur_score < settings.BLUR_THRESHOLD:
-                    logger.debug(
-                        "Skipping blurry face crop (score=%.1f < threshold=%.1f)",
-                        blur_score, settings.BLUR_THRESHOLD,
-                    )
-                    continue
+        # Update tracker with current detections
+        active_tracks = self._tracker.update(boxes)
 
-                # Pre-process face crop
-                face = enhance_face(face)
-                face_resized = cv2.resize(face, (settings.FACE_SIZE, settings.FACE_SIZE))
+        # Build a dict of track → identity for all tracks that have history
+        smoothed: dict[int, str] = {}
+        for track in active_tracks:
+            if track.smoothed_identity:
+                smoothed[track.track_id] = track.smoothed_identity
+
+        # For each active track, run ArcFace and update identity history
+        for track in active_tracks:
+            x1, y1, x2, y2 = map(int, track.bbox)
+            face = frame[y1:y2, x1:x2]
+            if face.size == 0:
+                continue
+
+            # ── Blur quality gate (Phase 1) ────────────────────────────────
+            blur_score = cv2.Laplacian(face, cv2.CV_64F).var()
+            if blur_score < settings.BLUR_THRESHOLD:
+                logger.debug(
+                    "Track %d: skipping blurry crop (score=%.1f)",
+                    track.track_id, blur_score,
+                )
+                # Still annotate with last known identity if available
+                identity = smoothed.get(track.track_id, "Unknown")
+                score = 0.0
+            else:
+                # Pre-process + embed
+                face_enhanced = enhance_face(face)
+                face_resized = cv2.resize(face_enhanced, (settings.FACE_SIZE, settings.FACE_SIZE))
                 face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
 
-                # Compute embedding
                 embedding = arcface.get_feat(face_rgb).flatten()
                 norm = np.linalg.norm(embedding)
                 if norm == 0:
                     continue
                 embedding = embedding / norm
 
-                # Recognise
                 identity, score = recognize_face(embedding)
 
-                # Temporal smoothing (per-face, keyed by spatial region)
-                face_key = self._get_face_key(x1, y1, x2, y2)
-                if face_key not in self._histories:
-                    self._histories[face_key] = deque(maxlen=settings.HISTORY_LEN)
-                self._histories[face_key].append(identity)
-                identity = max(set(self._histories[face_key]),
-                               key=self._histories[face_key].count)
+                # Push into tracker's history for this track
+                track.identity_history.append(identity)
+                identity = track.smoothed_identity or identity
 
-                # Draw on frame
-                color = (0, 255, 0) if identity != "Unauthorized" else (0, 0, 255)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(
-                    frame,
-                    f"{identity} ({score:.2f})",
-                    (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    color,
-                    2,
-                )
+            # ── Annotate ───────────────────────────────────────────────────
+            color = (0, 255, 0) if identity not in ("Unauthorized", "Unknown") else (0, 0, 255)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-                detected = DetectedFace(
-                    name=identity,
-                    confidence=round(score, 4),
-                    bbox=(x1, y1, x2, y2),
-                )
-                detected_faces.append(detected)
+            # Track ID badge (small, top-right of box)
+            cv2.putText(
+                frame,
+                f"#{track.track_id}",
+                (x2 - 30, y1 + 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (200, 200, 200),
+                1,
+            )
 
-        # Update recent faces
+            label = f"{identity} ({score:.2f})" if score > 0 else identity
+            cv2.putText(
+                frame,
+                label,
+                (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2,
+            )
+
+            detected_faces.append(DetectedFace(
+                name=identity,
+                confidence=round(score, 4),
+                bbox=(x1, y1, x2, y2),
+            ))
+
+        # Update recent faces buffer
         with self._lock:
             self._recent_faces.extend(detected_faces)
 
@@ -196,7 +255,7 @@ class FrameProcessor:
             self._fps_time = now
             self._frame_count = 0
 
-        # Draw FPS on frame
+        # Draw FPS overlay
         cv2.putText(
             frame,
             f"FPS: {self._fps:.1f}",
@@ -213,6 +272,13 @@ class FrameProcessor:
             fps=round(self._fps, 2),
         )
 
+    # ── Convenience wrapper (used by tests / local dev) ──────────────────
+    def process(self, frame: np.ndarray) -> ProcessedFrame:
+        """Run both stages sequentially (single-threaded path)."""
+        preprocessed, boxes = self.detect(frame)
+        return self.recognize_and_annotate(preprocessed, boxes)
+
+    # ── Properties ────────────────────────────────────────────────────────
     @property
     def fps(self) -> float:
         return round(self._fps, 2)
