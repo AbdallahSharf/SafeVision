@@ -122,8 +122,12 @@ def _mjpeg_generator():
             frame_bytes = _latest_frame
 
         if not frame_bytes:
-            time.sleep(0.05)
-            continue
+            import numpy as np
+            # Create a black placeholder image with text
+            img = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(img, "Camera Connecting or Offline", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            _, jpeg = cv2.imencode(".jpg", img)
+            frame_bytes = jpeg.tobytes()
 
         yield (
             b"--frame\r\n"
