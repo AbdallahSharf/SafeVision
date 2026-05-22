@@ -119,8 +119,8 @@ jobs:
               --env-file /opt/safevision/.env \
               "${FULL_IMAGE}"
 
-            # Clean up old Docker images to save disk space
-            docker image prune -f
+            # Aggressively clean up all unused Docker images to save disk space
+            docker system prune -af
           EOF
 
           # Clean up key file
