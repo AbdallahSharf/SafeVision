@@ -97,7 +97,7 @@ jobs:
           chmod 600 /tmp/gce_key
 
           # SSH into the VM and run deployment commands
-          ssh -o StrictHostKeyChecking=no -i /tmp/gce_key "${USER}@${VM_IP}" << EOF
+          ssh -o StrictHostKeyChecking=no -i /tmp/gce_key "Abdallah@${VM_IP}" << EOF
             # Authenticate Docker to pull from Artifact Registry
             gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
 
