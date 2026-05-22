@@ -6,15 +6,15 @@
 #   2. Pushes to Google Artifact Registry
 #   3. SSHs into GCE VM to pull & restart the container
 #
-# Required GitHub Secrets:
+# Required GitHub Secrets (non-sensitive values are hardcoded as env vars below):
 #   GCP_PROJECT_ID      — Google Cloud project ID (e.g. safevision-00)
 #   GCP_WIF_PROVIDER    — Workload Identity Provider resource name
-#                         (projects/NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER)
-#   GCP_SA_EMAIL        — Service account email (github-actions@PROJECT_ID.iam.gserviceaccount.com)
-#   GCE_VM_NAME         — Name of the Compute Engine VM (e.g. safevision-vm)
-#   GCE_VM_ZONE         — Zone of the VM (e.g. me-west1-a)
-#   GCP_REGION          — Artifact Registry region (e.g. me-west1)
+#   GCP_SA_EMAIL        — Service account email
+#   GCE_VM_NAME         — VM name (e.g. safevision-vm)
+#   GCE_VM_ZONE         — VM zone (e.g. me-west1-a)
 #   GCE_SSH_PRIVATE_KEY — Private SSH key to connect to the VM
+#
+# NOTE: GCP_REGION is NOT a secret — it is hardcoded in env below.
 # =============================================================================
 
 name: Deploy to Google Compute Engine
@@ -26,13 +26,15 @@ on:
 env:
   IMAGE_NAME: safevision
   REPO_NAME: safevision
+  # ── Non-sensitive config (hardcoded — change these if you switch region) ──
+  GCP_REGION: me-west1
 
 jobs:
   deploy:
     name: Build & Deploy
     runs-on: ubuntu-latest
 
-    # Required for Workload Identity Federation (keyless auth)
+    # Required for Workload Identity Federation (keyless auth — no JSON key)
     permissions:
       contents: read
       id-token: write
@@ -44,7 +46,7 @@ jobs:
         with:
           lfs: true   # Pull Git LFS model files (.pt, .onnx)
 
-      # ── 2. Authenticate with Google Cloud (keyless WIF — no JSON key) ──────
+      # ── 2. Authenticate with Google Cloud (Workload Identity Federation) ──
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -56,18 +58,18 @@ jobs:
 
       # ── 3. Configure Docker to push to Artifact Registry ──────────────────
       - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
 
       # ── 4. Build Docker image ─────────────────────────────────────────────
       - name: Build Docker image
         run: |
-          FULL_IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}"
+          FULL_IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}"
           docker build -t "${FULL_IMAGE}:${{ github.sha }}" -t "${FULL_IMAGE}:latest" .
 
       # ── 5. Push Docker image ──────────────────────────────────────────────
       - name: Push Docker image
         run: |
-          FULL_IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}"
+          FULL_IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}"
           docker push "${FULL_IMAGE}:${{ github.sha }}"
           docker push "${FULL_IMAGE}:latest"
 
@@ -87,7 +89,8 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.GCE_SSH_PRIVATE_KEY }}
           VM_IP: ${{ steps.get-ip.outputs.vm_ip }}
-          FULL_IMAGE: "${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          FULL_IMAGE: "${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          GCP_REGION: ${{ env.GCP_REGION }}
         run: |
           # Write the SSH private key to a temp file
           echo "${SSH_PRIVATE_KEY}" > /tmp/gce_key
@@ -96,7 +99,7 @@ jobs:
           # SSH into the VM and run deployment commands
           ssh -o StrictHostKeyChecking=no -i /tmp/gce_key "${USER}@${VM_IP}" << EOF
             # Authenticate Docker to pull from Artifact Registry
-            gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+            gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
 
             # Pull the new image
             docker pull "${FULL_IMAGE}"
@@ -131,7 +134,7 @@ jobs:
           echo "   Health: http://${VM_IP}:8080/health"
           echo "   Status: http://${VM_IP}:8080/status"
 
-          # Give the app time to start up (models take ~60s to load)
+          # Give the app time to start up (models take ~90s to load on GPU)
           echo "Waiting 90 seconds for models to load..."
           sleep 90
 
@@ -139,5 +142,5 @@ jobs:
           if curl --fail --silent --max-time 10 "http://${VM_IP}:8080/health"; then
             echo "✅ Health check passed!"
           else
-            echo "⚠️ Health check pending — check docker logs safevision on the VM"
+            echo "⚠️ Health check pending — check: docker logs safevision"
           fi
