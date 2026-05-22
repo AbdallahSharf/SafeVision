@@ -1,7 +1,8 @@
 # Use NVIDIA CUDA 12.1 runtime on Ubuntu 22.04 — enables GPU inside the container
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
 
-# System dependencies for Python 3.10, OpenCV headless, and FFmpeg (RTSP)
+# System dependencies for Python 3.10, OpenCV headless, FFmpeg (RTSP),
+# and build tools required to compile insightface's Cython extensions
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3.10-dev \
@@ -9,6 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 \
     ffmpeg \
+    build-essential \
+    cmake \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Make python3.10 the default python
