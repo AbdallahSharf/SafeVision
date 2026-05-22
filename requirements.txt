@@ -8,13 +8,11 @@ opencv-python-headless==4.10.0.84
 numpy==1.26.4
 pillow==10.4.0
 
-# Deep learning — CUDA 12.1 build (matches the Docker base image)
-# CPU users: replace cu121 with cpu in the index URL
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.4.1+cu121
-torchvision==0.19.1+cu121
+# Deep learning (CPU — switch to cu121 build when GPU VM is ready)
+torch==2.4.1
+torchvision==0.19.1
 insightface==0.7.3
-onnxruntime-gpu==1.19.2
+onnxruntime==1.19.2
 
 # Database
 pymongo==4.8.0
