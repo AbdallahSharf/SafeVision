@@ -97,10 +97,15 @@ jobs:
           echo "${SSH_PRIVATE_KEY}" > /tmp/gce_key
           chmod 600 /tmp/gce_key
 
+          # Get an access token from the GitHub runner
+          GCP_TOKEN=$(gcloud auth print-access-token)
+
           # SSH into the VM and run deployment commands
           ssh -o StrictHostKeyChecking=no -i /tmp/gce_key "Abdallah@${VM_IP}" << EOF
-            # Authenticate Docker to pull from Artifact Registry
-            gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+            set -e
+            
+            # Authenticate Docker using the runner's access token
+            echo "${GCP_TOKEN}" | docker login -u oauth2accesstoken --password-stdin https://${GCP_REGION}-docker.pkg.dev
 
             # Pull the new image
             docker pull "${FULL_IMAGE}"
