@@ -70,7 +70,7 @@ FastAPI serves dual duty: it streams MJPEG video frames and exposes REST endpoin
 - **Automatic OpenAPI docs** — `/docs` is available out-of-the-box for free.
 - **Pydantic validation** — Strict typing catches bugs early.
 
-### 🤖 YOLOv8 (Ultralytics) — Face Detection
+### 🤖 YOLOv11 (Ultralytics) — Face Detection
 YOLO (You Only Look Once) is a single-shot object detector that runs in real time even on CPU. We use a **custom-trained** YOLO model (`best.pt`) specifically fine-tuned on face data, so it detects faces with much higher precision than a generic YOLO model. It outperforms alternatives like Haar cascades (too many false positives) and MTCNN (too slow for real-time video).
 
 ### 🧠 ArcFace via InsightFace (ONNX) — Face Recognition
