@@ -1,14 +1,10 @@
 FROM python:3.10-slim
 
-# System dependencies for OpenCV headless, FFmpeg (RTSP),
-# and build tools required to compile insightface's Cython extensions
+# System dependencies for OpenCV headless and FFmpeg (RTSP decoding)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 \
     ffmpeg \
-    build-essential \
-    cmake \
-    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /safevision
