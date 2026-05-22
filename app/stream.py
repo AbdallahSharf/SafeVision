@@ -30,7 +30,7 @@ class VideoStream:
 
         self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open RTSP stream: {self.rtsp_url}")
+            logger.warning("Cannot open RTSP stream at startup: %s. Will keep retrying.", self.rtsp_url)
 
         self.q: queue.Queue = queue.Queue(maxsize=self._queue_size)
         self.running = True
