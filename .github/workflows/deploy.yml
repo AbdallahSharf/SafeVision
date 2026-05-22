@@ -7,8 +7,10 @@
 #   3. SSHs into GCE VM to pull & restart the container
 #
 # Required GitHub Secrets:
-#   GCP_PROJECT_ID      — Google Cloud project ID (e.g. safevision-123456)
-#   GCP_SA_KEY          — Service account JSON key (raw JSON text)
+#   GCP_PROJECT_ID      — Google Cloud project ID (e.g. safevision-00)
+#   GCP_WIF_PROVIDER    — Workload Identity Provider resource name
+#                         (projects/NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER)
+#   GCP_SA_EMAIL        — Service account email (github-actions@PROJECT_ID.iam.gserviceaccount.com)
 #   GCE_VM_NAME         — Name of the Compute Engine VM (e.g. safevision-vm)
 #   GCE_VM_ZONE         — Zone of the VM (e.g. me-west1-a)
 #   GCP_REGION          — Artifact Registry region (e.g. me-west1)
@@ -30,6 +32,11 @@ jobs:
     name: Build & Deploy
     runs-on: ubuntu-latest
 
+    # Required for Workload Identity Federation (keyless auth)
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       # ── 1. Checkout code ──────────────────────────────────────────────────
       - name: Checkout code
@@ -37,11 +44,12 @@ jobs:
         with:
           lfs: true   # Pull Git LFS model files (.pt, .onnx)
 
-      # ── 2. Authenticate with Google Cloud ─────────────────────────────────
+      # ── 2. Authenticate with Google Cloud (keyless WIF — no JSON key) ──────
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
@@ -97,10 +105,11 @@ jobs:
             docker stop safevision 2>/dev/null || true
             docker rm safevision 2>/dev/null || true
 
-            # Start new container
+            # Start new container with GPU access
             docker run -d \
               --name safevision \
               --restart unless-stopped \
+              --gpus all \
               -p 8080:8080 \
               --env-file /opt/safevision/.env \
               "${FULL_IMAGE}"

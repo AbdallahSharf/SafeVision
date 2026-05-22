@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 from app.enhancement import enhance_frame, enhance_face
-from app.models_loader import get_yolo, get_arcface
+from app.models_loader import get_yolo, get_arcface, _DEVICE
 from app.recognition import recognize_face
 
 logger = logging.getLogger("safevision")
@@ -91,6 +91,7 @@ class FrameProcessor:
             frame,
             conf=settings.YOLO_CONF_THRESHOLD,
             imgsz=settings.IMGSZ,
+            device=_DEVICE,
             verbose=False,
         )
 
