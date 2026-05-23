@@ -30,8 +30,8 @@ _DEVICE = "cuda:0" if _CUDA_AVAILABLE else "cpu"
 
 if _CUDA_AVAILABLE:
     gpu_name = torch.cuda.get_device_name(0)
-    logger.info("GPU detected: %s — models will run on CUDA", gpu_name)
-    _ORT_PROVIDERS = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    logger.info("GPU detected: %s — models will run on TensorRT/CUDA", gpu_name)
+    _ORT_PROVIDERS = ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
 else:
     logger.info("No GPU detected — models will run on CPU")
     _ORT_PROVIDERS = ["CPUExecutionProvider"]
@@ -97,11 +97,18 @@ def get_yolo():
         with _lock:
             if _yolo_model is None:
                 from ultralytics import YOLO
+                import os
 
-                logger.info("Loading YOLO model: %s on %s", settings.YOLO_MODEL_PATH, _DEVICE)
-                _yolo_model = YOLO(settings.YOLO_MODEL_PATH)
-                _yolo_model.to(_DEVICE)
-                _yolo_model.fuse()
+                engine_path = settings.YOLO_MODEL_PATH.replace('.pt', '.engine')
+                if os.path.exists(engine_path):
+                    logger.info("Loading YOLO TensorRT engine: %s", engine_path)
+                    _yolo_model = YOLO(engine_path, task='detect')
+                else:
+                    logger.info("Loading YOLO PyTorch model: %s on %s", settings.YOLO_MODEL_PATH, _DEVICE)
+                    _yolo_model = YOLO(settings.YOLO_MODEL_PATH)
+                    _yolo_model.to(_DEVICE)
+                    _yolo_model.fuse()
+                    
                 logger.info("YOLO model loaded on %s.", _DEVICE)
     return _yolo_model
 

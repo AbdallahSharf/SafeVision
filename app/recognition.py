@@ -141,3 +141,62 @@ def recognize_face(
     except Exception as exc:
         logger.error("MongoDB vector search error: %s", exc)
         return "Error", 0.0
+
+from app.database import async_faces_collection
+
+async def async_recognize_face(
+    embedding: np.ndarray,
+    threshold: float | None = None,
+) -> Tuple[str, float]:
+    """
+    Asynchronous version of recognize_face using Motor.
+    """
+    try:
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "queryVector": embedding.tolist(),
+                    "path": "embedding",
+                    "numCandidates": settings.DB_NUM_CANDIDATES,
+                    "limit": settings.DB_TOP_K,
+                }
+            },
+            {
+                "$project": {
+                    "name": 1,
+                    "score": {"$meta": "vectorSearchScore"},
+                }
+            },
+        ]
+        
+        cursor = async_faces_collection.aggregate(pipeline)
+        results = await cursor.to_list(length=settings.DB_TOP_K)
+
+        if not results:
+            return "Unauthorized", 0.0
+
+        scores_by_name: Dict[str, float] = {}
+        for match in results:
+            name = match.get("name", "Unknown")
+            score = match.get("score", 0.0)
+            if score > scores_by_name.get(name, 0.0):
+                scores_by_name[name] = score
+
+        best_name = max(scores_by_name, key=scores_by_name.__getitem__)
+        best_score = scores_by_name[best_name]
+
+        effective_threshold = threshold if threshold is not None else get_threshold(best_name)
+
+        if best_score < effective_threshold:
+            logger.debug(
+                "[Async] Best match '%s' (score=%.3f) below threshold %.3f — Unauthorized",
+                best_name, best_score, effective_threshold,
+            )
+            return "Unauthorized", best_score
+
+        return best_name, best_score
+
+    except Exception as exc:
+        logger.error("[Async] MongoDB vector search error: %s", exc)
+        return "Error", 0.0

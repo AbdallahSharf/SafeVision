@@ -27,12 +27,23 @@ import numpy as np
 
 from app.enhancement import enhance_frame, enhance_face
 from app.models_loader import get_yolo, get_arcface, _DEVICE
-from app.recognition import recognize_face
+import asyncio
+from app.recognition import recognize_face, async_recognize_face
 from app.tracker import FaceTracker
 from app.alerts import send_unauthorized_alert
 
 logger = logging.getLogger("safevision")
 
+# ---------------------------------------------------------------------------
+# Async DB Background Loop
+# ---------------------------------------------------------------------------
+_db_loop = asyncio.new_event_loop()
+def _run_db_loop():
+    asyncio.set_event_loop(_db_loop)
+    _db_loop.run_forever()
+
+_db_thread = threading.Thread(target=_run_db_loop, daemon=True, name="sv-db-loop")
+_db_thread.start()
 
 # ---------------------------------------------------------------------------
 # Data classes for structured results
@@ -211,19 +222,23 @@ class FrameProcessor:
                     if norm > 0:
                         embedding = embedding / norm
 
-                        identity, score = recognize_face(embedding)
-
-                        # Push into tracker's history for this track
-                        track.identity_history.append(identity)
-                        track.last_score = score
+                        # ── Asynchronous Database Search ─────────────────────────
+                        # Dispatch the heavy Vector Search to a background thread
+                        # so the video stream never stutters or drops frames.
+                        async def _do_recognize(emb, trk, box):
+                            ident, scr = await async_recognize_face(emb)
+                            trk.identity_history.append(ident)
+                            trk.last_score = scr
+                            if ident == "Unauthorized":
+                                send_unauthorized_alert(scr, box)
                         
-                        identity = track.smoothed_identity or identity
+                        asyncio.run_coroutine_threadsafe(
+                            _do_recognize(embedding, track, (x1, y1, x2, y2)),
+                            _db_loop
+                        )
                         
-                        # Trigger real-time alert if unauthorized
-                        if identity == "Unauthorized":
-                            send_unauthorized_alert(score, (x1, y1, x2, y2))
-                
-                identity = track.smoothed_identity or "Unknown"
+                        # Use best known identity for this frame while we wait
+                        identity = track.smoothed_identity or "Checking..."
                 score = track.last_score
 
             # ── Annotate ───────────────────────────────────────────────────

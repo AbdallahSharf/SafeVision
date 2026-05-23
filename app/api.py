@@ -64,9 +64,13 @@ _start_time: float = 0.0
 _rtsp_queue: queue.Queue = queue.Queue(maxsize=3)     # raw BGR frames
 _detect_queue: queue.Queue = queue.Queue(maxsize=3)   # (preprocessed_frame, boxes)
 
-# Latest JPEG bytes served to MJPEG clients
-_latest_frame: bytes = b""
+# Latest raw frame served to WebRTC clients
+_latest_raw_frame: np.ndarray | None = None
 _frame_lock = threading.Lock()
+
+def get_latest_raw_frame():
+    with _frame_lock:
+        return _latest_raw_frame
 
 # Thread handles (daemon=True so they die when the main process exits)
 _reader_thread: threading.Thread | None = None
@@ -149,12 +153,8 @@ def _recognizer_loop() -> None:
 
         result = _processor.recognize_and_annotate(frame, boxes)
 
-        _, jpeg = cv2.imencode(
-            ".jpg", result.annotated,
-            [cv2.IMWRITE_JPEG_QUALITY, settings.STREAM_JPEG_QUALITY],
-        )
         with _frame_lock:
-            _latest_frame = jpeg.tobytes()
+            _latest_raw_frame = result.annotated
 
     logger.info("Recognizer thread exited.")
 
@@ -193,6 +193,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down …")
     if _video_stream:
         _video_stream.stop()
+    await on_shutdown()
     logger.info("Shutdown complete.")
 
 
@@ -216,30 +217,17 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------------------
-# MJPEG generator
-# ---------------------------------------------------------------------------
-def _placeholder_frame() -> bytes:
-    """Generate a 'Camera Connecting or Offline' placeholder JPEG."""
-    img = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.putText(img, "Camera Connecting or Offline", (50, 240),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-    _, jpeg = cv2.imencode(".jpg", img)
-    return jpeg.tobytes()
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from app.webrtc import SafeVisionTrack
 
+# Global set to keep track of active WebRTC peer connections
+_pcs = set()
 
-def _mjpeg_generator():
-    """Yield JPEG frames in MJPEG multipart format at ~30 FPS."""
-    _placeholder = _placeholder_frame()
-    while True:
-        with _frame_lock:
-            frame_bytes = _latest_frame or _placeholder
-
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-        )
-        time.sleep(0.033)   # ~30 FPS cap
+async def on_shutdown():
+    # Close all WebRTC connections gracefully
+    coros = [pc.close() for pc in _pcs]
+    await asyncio.gather(*coros)
+    _pcs.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -322,18 +310,40 @@ async def status():
     }
 
 
-@app.get("/stream", tags=["video"], dependencies=[Depends(verify_token)])
-async def video_stream():
-    """
-    Live MJPEG video stream with face recognition overlays.
+from pydantic import BaseModel
+import asyncio
 
-    Open this URL in your mobile app's image/video view component
-    to see the annotated camera feed in real time.
+class WebRTCOffer(BaseModel):
+    sdp: str
+    type: str
+
+@app.post("/offer", tags=["video"])
+async def webrtc_offer(offer: WebRTCOffer):
     """
-    return StreamingResponse(
-        _mjpeg_generator(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
+    WebRTC endpoint for ultra-low latency video streaming.
+    
+    Accepts an SDP offer and returns an SDP answer.
+    """
+    pc = RTCPeerConnection()
+    _pcs.add(pc)
+    
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        if pc.connectionState == "failed" or pc.connectionState == "closed":
+            _pcs.discard(pc)
+
+    # Attach our custom SafeVision video track
+    pc.addTrack(SafeVisionTrack())
+
+    # Set the remote description
+    offer_sdp = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
+    await pc.setRemoteDescription(offer_sdp)
+    
+    # Create and set the local description
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+    
+    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
 
 
 @app.get("/faces", tags=["recognition"], dependencies=[Depends(verify_token)])
