@@ -425,9 +425,17 @@ async def stream():
     """Live MJPEG video stream for legacy clients and browsers."""
     if _processor is None:
         raise HTTPException(status_code=503, detail="System starting up")
+        
+    headers = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "Connection": "keep-alive"
+    }
     return StreamingResponse(
         _generate_mjpeg(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=headers
     )
 
 
