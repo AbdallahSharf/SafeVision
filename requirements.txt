@@ -14,11 +14,11 @@ torchvision==0.19.1
 onnxruntime==1.19.2
 
 # Database
-pymongo==4.8.0
+pymongo>=4.9.0
 motor==3.6.0
 
 # TensorRT / WebRTC
-tensorrt
+tensorrt==10.0.1
 pycuda>=2024.1
 aiortc>=1.8.0
 aiohttp>=3.9.5
