@@ -1,9 +1,8 @@
 # GPU-enabled base image with PyTorch and CUDA pre-installed
-FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 
 # System dependencies for OpenCV headless and FFmpeg (RTSP decoding)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     libgl1 \
     libglib2.0-0 \
     ffmpeg \
