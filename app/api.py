@@ -263,8 +263,34 @@ async def root():
             "/health": "Health check",
             "/status": "System status & metrics",
             "/faces":  "Recently recognised faces",
+            "/offer":  "WebRTC offer endpoint",
         },
     }
+
+
+def _generate_mjpeg():
+    while True:
+        frame = get_latest_raw_frame()
+        if frame is None:
+            time.sleep(0.05)
+            continue
+        
+        # Encode as JPEG
+        _, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), settings.STREAM_JPEG_QUALITY])
+        yield (b"--frame\r\n"
+               b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n")
+        # Yield to allow other tasks (approx matching the camera FPS)
+        time.sleep(1 / 30.0)
+
+@app.get("/stream", tags=["video"])
+async def stream():
+    """Live MJPEG video stream for legacy clients and browsers."""
+    if _processor is None:
+        raise HTTPException(status_code=503, detail="System starting up")
+    return StreamingResponse(
+        _generate_mjpeg(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
 @app.get("/health", tags=["monitoring"])
