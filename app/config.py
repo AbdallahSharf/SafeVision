@@ -111,7 +111,7 @@ class Settings:
     LOW_LIGHT_AUTO_THRESHOLD: int   = int(os.environ.get("LOW_LIGHT_AUTO_THRESHOLD", "80"))
     CLAHE_CLIP_LIMIT:         float = float(os.environ.get("CLAHE_CLIP_LIMIT",  "3.0"))
     CLAHE_TILE_SIZE:          int   = int(os.environ.get("CLAHE_TILE_SIZE",     "8"))
-    DENOISE_STRENGTH:         int   = int(os.environ.get("DENOISE_STRENGTH",    "7"))
+    DENOISE_STRENGTH:         int   = int(os.environ.get("DENOISE_STRENGTH",    "0"))
 
 
 # Singleton — import ``settings`` everywhere
