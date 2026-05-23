@@ -1,4 +1,5 @@
-FROM python:3.10-slim
+# GPU-enabled base image with PyTorch and CUDA pre-installed
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 
 # System dependencies for OpenCV headless and FFmpeg (RTSP decoding)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -9,9 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /safevision
 
-# Install Python dependencies (cached layer — reinstall only when requirements change)
+# Install Python dependencies
+# Strip out CPU torch/onnxruntime from requirements so we keep the CUDA versions
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN sed -i '/torch/d' requirements.txt && \
+    sed -i '/onnxruntime/d' requirements.txt && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir onnxruntime-gpu
 
 # Copy application code and model weights
 COPY app/ ./app/

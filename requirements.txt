@@ -18,3 +18,4 @@ pymongo==4.8.0
 
 # Utilities
 python-dotenv==1.0.1
+firebase-admin>=6.5.0

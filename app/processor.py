@@ -29,6 +29,7 @@ from app.enhancement import enhance_frame, enhance_face
 from app.models_loader import get_yolo, get_arcface, _DEVICE
 from app.recognition import recognize_face
 from app.tracker import FaceTracker
+from app.alerts import send_unauthorized_alert
 
 logger = logging.getLogger("safevision")
 
@@ -210,6 +211,10 @@ class FrameProcessor:
                 # Push into tracker's history for this track
                 track.identity_history.append(identity)
                 identity = track.smoothed_identity or identity
+                
+                # Trigger real-time alert if unauthorized
+                if identity == "Unauthorized":
+                    send_unauthorized_alert(score, (x1, y1, x2, y2))
 
             # ── Annotate ───────────────────────────────────────────────────
             color = (0, 255, 0) if identity not in ("Unauthorized", "Unknown") else (0, 0, 255)

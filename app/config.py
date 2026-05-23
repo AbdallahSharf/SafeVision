@@ -53,13 +53,21 @@ def _require_env(name: str) -> str:
 class Settings:
     """Typed, validated application settings — instantiated once at startup."""
 
-    # ── Required ──────────────────────────────────────────────────────────
-    MONGO_URI: str = field(default_factory=lambda: _require_env("MONGO_URI"))
-    RTSP_URL:  str = field(default_factory=lambda: _require_env("RTSP_URL"))
+    # ── Database ──────────────────────────────────────────────────────────
+    MONGO_URI: str = os.environ.get(
+        "MONGO_URI",
+        "mongodb+srv://admin:pass@cluster.mongodb.net/test?retryWrites=true&w=majority",
+    )
+
+    # ── Security & Alerts ─────────────────────────────────────────────────
+    API_SECRET_KEY: str = os.environ.get("API_SECRET_KEY", "")
+    FIREBASE_CREDENTIALS_PATH: str = os.environ.get("FIREBASE_CREDENTIALS_PATH", "")
+    FCM_TOPIC: str = os.environ.get("FCM_TOPIC", "safevision-alerts")
 
     # ── Server ────────────────────────────────────────────────────────────
     PORT: int           = int(os.environ.get("PORT", "8080"))
     DISPLAY_OUTPUT: bool = os.environ.get("DISPLAY_OUTPUT", "false").lower() == "true"
+    RTSP_URL:  str = field(default_factory=lambda: _require_env("RTSP_URL"))
 
     # ── Model paths ───────────────────────────────────────────────────────
     YOLO_MODEL_PATH:    str = os.environ.get("YOLO_MODEL_PATH",    "models/best.pt")

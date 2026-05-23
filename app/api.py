@@ -40,14 +40,16 @@ from contextlib import asynccontextmanager
 
 import cv2
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.database import faces_collection
 from app.stream import VideoStream
 from app.processor import FrameProcessor
 from app.recognition import reload_thresholds
+from app.alerts import init_firebase
 
 logger = logging.getLogger("safevision")
 
@@ -172,6 +174,9 @@ async def lifespan(app: FastAPI):
     _video_stream = VideoStream()
     _processor = FrameProcessor()
 
+    # Initialize Firebase for push notifications
+    init_firebase()
+
     # Start all three pipeline threads
     _reader_thread = threading.Thread(target=_reader_loop, daemon=True, name="sv-reader")
     _detector_thread = threading.Thread(target=_detector_loop, daemon=True, name="sv-detector")
@@ -238,8 +243,26 @@ def _mjpeg_generator():
 
 
 # ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+security = HTTPBearer(auto_error=False)
+
+def verify_token(credentials: HTTPAuthorizationCredentials | None = Depends(security)):
+    """Validate Bearer token for protected routes."""
+    if not settings.API_SECRET_KEY:
+        # If no secret is configured, allow all (useful for dev)
+        return
+        
+    if not credentials or credentials.credentials != settings.API_SECRET_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid or missing authentication token",
+        )
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
 @app.get("/", tags=["info"])
 async def root():
     """API information."""
@@ -299,7 +322,7 @@ async def status():
     }
 
 
-@app.get("/stream", tags=["video"])
+@app.get("/stream", tags=["video"], dependencies=[Depends(verify_token)])
 async def video_stream():
     """
     Live MJPEG video stream with face recognition overlays.
@@ -313,7 +336,7 @@ async def video_stream():
     )
 
 
-@app.get("/faces", tags=["recognition"])
+@app.get("/faces", tags=["recognition"], dependencies=[Depends(verify_token)])
 async def recent_faces(limit: int = 20):
     """Return the most recently recognised faces."""
     if _processor is None:
@@ -321,7 +344,7 @@ async def recent_faces(limit: int = 20):
     return {"faces": _processor.get_recent_faces(limit=limit)}
 
 
-@app.post("/admin/reload-thresholds", tags=["admin"])
+@app.post("/admin/reload-thresholds", tags=["admin"], dependencies=[Depends(verify_token)])
 async def admin_reload_thresholds():
     """
     Recompute adaptive per-identity recognition thresholds from current
