@@ -191,11 +191,17 @@ class FrameProcessor:
                 identity = smoothed.get(track.track_id, "Unknown")
                 score = 0.0
             else:
+                if not hasattr(track, 'is_recognizing'):
+                    track.is_recognizing = False
+
                 # Only run heavy ArcFace if this track has no identity yet,
                 # or periodically (staggered by track_id) to verify they haven't swapped.
-                needs_recognition = not track.identity_history or (self._frame_count % 15 == track.track_id % 15)
+                # Crucially, skip if we are ALREADY querying the DB for this track!
+                needs_recognition = not track.is_recognizing and (not track.identity_history or self._frame_count % 15 == track.track_id % 15)
                 
                 if needs_recognition:
+                    track.is_recognizing = True  # Lock this track to prevent spamming the DB
+                    
                     # Pre-process
                     face_enhanced = enhance_face(face)
                     face_resized = cv2.resize(face_enhanced, (settings.FACE_SIZE, settings.FACE_SIZE))
@@ -254,11 +260,14 @@ class FrameProcessor:
 
                     # ── Asynchronous Database Search ─────────────────────────
                     async def _do_recognize(emb, trk, box):
-                        ident, scr = await async_recognize_face(emb)
-                        trk.identity_history.append(ident)
-                        trk.last_score = scr
-                        if ident == "Unauthorized":
-                            send_unauthorized_alert(scr, box)
+                        try:
+                            ident, scr = await async_recognize_face(emb)
+                            trk.identity_history.append(ident)
+                            trk.last_score = scr
+                            if ident == "Unauthorized":
+                                send_unauthorized_alert(scr, box)
+                        finally:
+                            trk.is_recognizing = False
                     
                     asyncio.run_coroutine_threadsafe(
                         _do_recognize(embedding, track, boxes_to_recognize[i]),

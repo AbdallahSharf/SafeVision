@@ -22,6 +22,7 @@ RUN sed -i '/torch/d' requirements.txt && \
 # Copy application code and model weights
 COPY app/ ./app/
 COPY models/ ./models/
+COPY scripts/ ./scripts/
 
 # Headless mode — no GUI on a server
 ENV DISPLAY_OUTPUT=false
