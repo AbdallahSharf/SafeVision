@@ -42,19 +42,28 @@ class VideoStream:
 
     # ── Background reader ─────────────────────────────────────────────────
     def _update(self) -> None:
+        fail_count = 0
         while self.running:
             try:
                 if not self.cap.isOpened():
                     logger.warning("Stream lost — reconnecting …")
                     self.cap.open(self.rtsp_url)
                     time.sleep(1)
+                    fail_count = 0
                     continue
 
                 ret, frame = self.cap.read()
                 if not ret or frame is None:
+                    fail_count += 1
+                    if fail_count > 20:
+                        logger.warning("Stream read failed %d times. Forcing reconnection.", fail_count)
+                        self.cap.release()
+                        fail_count = 0
                     time.sleep(0.05)
                     continue
 
+                fail_count = 0
+                
                 # Drop oldest frame if the consumer is too slow
                 if self.q.full():
                     try:
