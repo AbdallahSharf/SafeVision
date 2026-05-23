@@ -105,9 +105,8 @@ class FrameProcessor:
         """
         Stage 1 — preprocess + YOLO detection (runs in the detector thread).
 
-        Frame skipping: YOLO runs only once every DETECT_EVERY_N frames.
-        Between YOLO runs the cached boxes from the previous run are reused,
-        so ArcFace still runs every frame on the most recent known positions.
+        Runs YOLO on every frame to ensure ByteTrack gets accurate positions
+        for smooth tracking.
 
         Parameters
         ----------
@@ -124,34 +123,31 @@ class FrameProcessor:
         frame = cv2.resize(raw_frame, (settings.FRAME_WIDTH, settings.FRAME_HEIGHT))
         frame = enhance_frame(frame)
 
-        self._frame_idx += 1
-        if self._frame_idx % settings.DETECT_EVERY_N == 0:
-            results = yolo(
-                frame,
-                conf=settings.YOLO_CONF_THRESHOLD,
-                imgsz=settings.IMGSZ,
-                device=_DEVICE,
-                verbose=False,
-            )
-            h, w = frame.shape[:2]
-            boxes = []
-            for r in results:
-                for i in range(len(r.boxes)):
-                    if float(r.boxes.conf[i]) < settings.BOX_CONF_THRESHOLD:
-                        continue
-                    cls = int(r.boxes.cls[i])
-                    if yolo.names.get(cls, "").lower() != "face":
-                        continue
-                    x1, y1, x2, y2 = map(int, r.boxes.xyxy[i])
-                    # Expand by margin
-                    x1 = max(0, x1 - settings.FACE_MARGIN)
-                    y1 = max(0, y1 - settings.FACE_MARGIN)
-                    x2 = min(w, x2 + settings.FACE_MARGIN)
-                    y2 = min(h, y2 + settings.FACE_MARGIN)
-                    boxes.append((x1, y1, x2, y2))
-            self._cached_boxes = boxes
+        results = yolo(
+            frame,
+            conf=settings.YOLO_CONF_THRESHOLD,
+            imgsz=settings.IMGSZ,
+            device=_DEVICE,
+            verbose=False,
+        )
+        h, w = frame.shape[:2]
+        boxes = []
+        for r in results:
+            for i in range(len(r.boxes)):
+                if float(r.boxes.conf[i]) < settings.BOX_CONF_THRESHOLD:
+                    continue
+                cls = int(r.boxes.cls[i])
+                if yolo.names.get(cls, "").lower() != "face":
+                    continue
+                x1, y1, x2, y2 = map(int, r.boxes.xyxy[i])
+                # Expand by margin
+                x1 = max(0, x1 - settings.FACE_MARGIN)
+                y1 = max(0, y1 - settings.FACE_MARGIN)
+                x2 = min(w, x2 + settings.FACE_MARGIN)
+                y2 = min(h, y2 + settings.FACE_MARGIN)
+                boxes.append((x1, y1, x2, y2))
 
-        return frame, self._cached_boxes
+        return frame, boxes
 
     # ── Stage 2: Recognition + Annotation ────────────────────────────────
     def recognize_and_annotate(
@@ -164,17 +160,6 @@ class FrameProcessor:
 
         Runs in the recognizer thread, consuming (frame, boxes) pairs
         produced by the detector thread.
-
-        Parameters
-        ----------
-        frame : np.ndarray
-            Preprocessed BGR frame (already resized + enhanced).
-        boxes : list of (x1, y1, x2, y2)
-            Face bounding boxes from Stage 1.
-
-        Returns
-        -------
-        ProcessedFrame
         """
         arcface = get_arcface()
         detected_faces: List[DetectedFace] = []
@@ -198,20 +183,16 @@ class FrameProcessor:
             # ── Blur quality gate (Phase 1) ────────────────────────────────
             blur_score = cv2.Laplacian(face, cv2.CV_64F).var()
             if blur_score < settings.BLUR_THRESHOLD:
-                logger.debug(
-                    "Track %d: skipping blurry crop (score=%.1f)",
-                    track.track_id, blur_score,
-                )
                 # Still annotate with last known identity if available
                 identity = smoothed.get(track.track_id, "Unknown")
                 score = 0.0
             else:
                 # ── Frame Skipping for Recognition ─────────────────────────────
-                # Only run the heavy ArcFace + MongoDB query if this is a fresh
-                # YOLO detection frame OR if we don't know who this track is yet.
-                is_fresh_detection = (self._frame_idx % settings.DETECT_EVERY_N == 0)
+                # Only run heavy ArcFace if this track has no identity yet,
+                # or periodically (every 15 frames) to verify they haven't swapped.
+                needs_recognition = not track.identity_history or (self._frame_count % 15 == 0)
                 
-                if is_fresh_detection or not track.identity_history:
+                if needs_recognition:
                     # Pre-process + embed
                     face_enhanced = enhance_face(face)
                     face_resized = cv2.resize(face_enhanced, (settings.FACE_SIZE, settings.FACE_SIZE))
@@ -223,8 +204,6 @@ class FrameProcessor:
                         embedding = embedding / norm
 
                         # ── Asynchronous Database Search ─────────────────────────
-                        # Dispatch the heavy Vector Search to a background thread
-                        # so the video stream never stutters or drops frames.
                         async def _do_recognize(emb, trk, box):
                             ident, scr = await async_recognize_face(emb)
                             trk.identity_history.append(ident)
