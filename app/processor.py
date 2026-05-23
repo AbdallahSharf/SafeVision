@@ -195,26 +195,36 @@ class FrameProcessor:
                 identity = smoothed.get(track.track_id, "Unknown")
                 score = 0.0
             else:
-                # Pre-process + embed
-                face_enhanced = enhance_face(face)
-                face_resized = cv2.resize(face_enhanced, (settings.FACE_SIZE, settings.FACE_SIZE))
-                face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
-
-                embedding = arcface.get_feat(face_rgb).flatten()
-                norm = np.linalg.norm(embedding)
-                if norm == 0:
-                    continue
-                embedding = embedding / norm
-
-                identity, score = recognize_face(embedding)
-
-                # Push into tracker's history for this track
-                track.identity_history.append(identity)
-                identity = track.smoothed_identity or identity
+                # ── Frame Skipping for Recognition ─────────────────────────────
+                # Only run the heavy ArcFace + MongoDB query if this is a fresh
+                # YOLO detection frame OR if we don't know who this track is yet.
+                is_fresh_detection = (self._frame_idx % settings.DETECT_EVERY_N == 0)
                 
-                # Trigger real-time alert if unauthorized
-                if identity == "Unauthorized":
-                    send_unauthorized_alert(score, (x1, y1, x2, y2))
+                if is_fresh_detection or not track.identity_history:
+                    # Pre-process + embed
+                    face_enhanced = enhance_face(face)
+                    face_resized = cv2.resize(face_enhanced, (settings.FACE_SIZE, settings.FACE_SIZE))
+                    face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
+
+                    embedding = arcface.get_feat(face_rgb).flatten()
+                    norm = np.linalg.norm(embedding)
+                    if norm > 0:
+                        embedding = embedding / norm
+
+                        identity, score = recognize_face(embedding)
+
+                        # Push into tracker's history for this track
+                        track.identity_history.append(identity)
+                        track.last_score = score
+                        
+                        identity = track.smoothed_identity or identity
+                        
+                        # Trigger real-time alert if unauthorized
+                        if identity == "Unauthorized":
+                            send_unauthorized_alert(score, (x1, y1, x2, y2))
+                
+                identity = track.smoothed_identity or "Unknown"
+                score = track.last_score
 
             # ── Annotate ───────────────────────────────────────────────────
             color = (0, 255, 0) if identity not in ("Unauthorized", "Unknown") else (0, 0, 255)

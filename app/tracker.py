@@ -68,6 +68,7 @@ class Track:
     track_id: int
     bbox: np.ndarray                        # [x1, y1, x2, y2]
     identity_history: deque = field(default_factory=lambda: deque(maxlen=settings.HISTORY_LEN))
+    last_score: float = 0.0
     lost_frames: int = 0
     _velocity: np.ndarray = field(default_factory=lambda: np.zeros(4))
     _prev_bbox: np.ndarray | None = None

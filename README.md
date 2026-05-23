@@ -443,7 +443,7 @@ We recently shipped a major update to the SafeVision pipeline to dramatically im
 ### ⚡ Performance Architecture
 - **Async 3-Stage Pipeline**: Decoupled the RTSP reader, YOLO detector, and ArcFace recognizer into separate concurrent threads connected by bounded queues. This pipelining roughly doubles throughput on multi-core CPUs.
 - **IoU-based Object Tracking (SORT-lite)**: Replaced grid-based spatial smoothing with a proper multi-object tracker. Each face gets a persistent integer ID across frames, eliminating "identity flicker" and correctly handling people crossing paths.
-- **Frame Skipping for Detection**: YOLO detection only runs every N frames (e.g., every 3rd frame), reusing cached bounding boxes in between. This drastically cuts CPU usage while keeping the stream perfectly smooth.
+- **Frame Skipping for Detection & Recognition**: YOLO detection and ArcFace recognition only run every N frames (e.g., every 3rd frame), reusing cached bounding boxes and identities in between. This drastically cuts CPU/GPU and MongoDB Vector Search load while keeping the stream perfectly smooth, eliminating frame drops.
 - **JPEG Quality Tuning**: MJPEG stream quality tuned from 80 to 65, reducing per-frame bandwidth by ~35% for a much smoother stream over the Tailscale VPN.
 
 ### 🎯 Accuracy & Reliability
@@ -455,7 +455,7 @@ We recently shipped a major update to the SafeVision pipeline to dramatically im
 ### 🔐 Security & Infrastructure
 - **API Authentication**: Added HTTP Bearer Token checks (via FastAPI's `Depends`) to secure the `/stream`, `/faces`, and `/admin` endpoints.
 - **Real-time Push Alerts**: Added Firebase Cloud Messaging (FCM) integration. A webhook fires the exact millisecond an "Unauthorized" face is detected, sending a push notification and confidence score directly to the mobile app.
-- **GPU Deployment Prep**: Updated the `Dockerfile` to use the official PyTorch CUDA base image and configured the GitHub Actions deployment script to utilize NVIDIA GPUs.
+- **GPU Deployment**: Migrated the deployment to a Google Cloud `europe-west4-a` Spot VM equipped with an NVIDIA Tesla T4 GPU. Updated the `Dockerfile` and CI/CD script to utilize the GPU via `--gpus all`.
 
 ---
 
@@ -467,10 +467,15 @@ If you are running this as a personal or home project, you can drastically reduc
 2. **Release your Static IP:** You are paying ~$3/mo for a static IP. Because the VM is connected to Tailscale, you can connect to the Tailscale `100.x.x.x` IP for free and release the public static IP.
 3. **Downgrade to Standard HDD:** You are currently using a 50GB SSD (~$8.50/mo). Since the AI models load directly into RAM on startup, you can recreate the VM using a Standard Persistent Disk to drop this cost to ~$2.00/mo without losing stream performance.
 
-### 🎯 Further AI Improvements
-1. **Upgrade to a GPU VM** — Switch to a GPU-enabled VM (e.g., GCE `n1-standard-4` with a T4 GPU in a supported zone like `europe-west4`) to increase throughput from ~15 FPS to 30+ FPS (PyTorch and ONNX Runtime automatically use CUDA). Note: You must request a GPU quota increase from Google Support first.
-2. **RetinaFace for Detection** — Replace the YOLO detector with RetinaFace to detect 5 facial landmarks (eyes, nose, mouth corners), enabling precise geometric alignment before ArcFace embedding.
-3. **WebRTC instead of MJPEG** — Migrate the stream endpoint to WebRTC (`aiortc`) for adaptive bitrate, sub-200ms latency, and better browser support.
+### 🎯 Further Recommendations for Performance & Accuracy
+**Performance:**
+1. **Asynchronous Database Queries** — Move the MongoDB `$vectorSearch` into an asynchronous background task so it never blocks the main video rendering thread, completely decoupling recognition from video FPS.
+2. **TensorRT Optimization** — Compile the YOLO and ArcFace ONNX models into NVIDIA TensorRT engines. This can double the inference speed on the T4 GPU compared to standard PyTorch.
+3. **WebRTC instead of MJPEG** — Migrate the stream endpoint to WebRTC (`aiortc`) for adaptive bitrate, sub-200ms latency, and better browser support over Tailscale.
+
+**Accuracy:**
+1. **Fine-Tune ArcFace** — Fine-tune the ArcFace model on low-angle, low-light security camera footage (currently it is trained on high-quality frontal faces like WebFace600k).
+2. **Specialized Dense Face Detector** — Replace the standard YOLO detector with RetinaFace or YOLOv11-Face to detect 5 facial landmarks (eyes, nose, mouth corners), enabling precise geometric alignment before ArcFace embedding.
 
 ---
 
