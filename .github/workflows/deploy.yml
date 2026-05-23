@@ -131,7 +131,7 @@ jobs:
             docker run -d \
               --name safevision \
               --restart unless-stopped \
-              -p 8080:8080 \
+              --network host \
               --gpus all \
               --env-file /opt/safevision/.env \
               "${FULL_IMAGE}"

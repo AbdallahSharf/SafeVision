@@ -141,7 +141,7 @@ def _recognizer_loop() -> None:
     FrameProcessor (ArcFace + ByteTrack smoothing + drawing), encodes
     the result as JPEG, and stores it in _latest_frame.
     """
-    global _latest_frame
+    global _latest_raw_frame
     logger.info("Recognizer thread started.")
     while True:
         try:
