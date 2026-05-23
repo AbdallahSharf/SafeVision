@@ -436,43 +436,31 @@ See [`.env.example`](.env.example) for all available variables with descriptions
 
 ---
 
-## 🚀 Suggested Improvements
+## 🚀 Recent Improvements (v2.0)
 
-### 🎯 Accuracy Improvements
+We recently shipped a major update to the SafeVision pipeline to dramatically improve performance, accuracy, and reliability:
 
-1. **Upgrade to a GPU VM** — The current VM runs all inference on CPU, which limits FPS. Switching to a GPU-enabled VM (e.g., GCE `n1-standard-4` with a T4 GPU) would increase throughput from ~5–10 FPS to 25–30 FPS without any code changes (PyTorch and ONNX Runtime automatically use CUDA if available).
+### ⚡ Performance Architecture
+- **Async 3-Stage Pipeline**: Decoupled the RTSP reader, YOLO detector, and ArcFace recognizer into separate concurrent threads connected by bounded queues. This pipelining roughly doubles throughput on multi-core CPUs.
+- **IoU-based Object Tracking (SORT-lite)**: Replaced grid-based spatial smoothing with a proper multi-object tracker. Each face gets a persistent integer ID across frames, eliminating "identity flicker" and correctly handling people crossing paths.
+- **Frame Skipping for Detection**: YOLO detection only runs every N frames (e.g., every 3rd frame), reusing cached bounding boxes in between. This drastically cuts CPU usage while keeping the stream perfectly smooth.
+- **JPEG Quality Tuning**: MJPEG stream quality tuned from 80 to 65, reducing per-frame bandwidth by ~35% for a much smoother stream over the Tailscale VPN.
 
-2. **Multi-angle enrollment** — Currently, a face is enrolled as a single embedding. Enrolling 5–10 embeddings of the same person from different angles and lighting conditions, then averaging queries against all of them, significantly improves recognition accuracy for non-frontal faces.
-
-3. **RetinaFace for detection** — Replace the YOLO detector with RetinaFace (also from InsightFace). RetinaFace simultaneously detects the face bounding box **and** 5 facial landmarks (eyes, nose, mouth corners), which enables precise geometric alignment before ArcFace embedding. Aligned faces produce more consistent and accurate embeddings.
-
-4. **Quality filter before recognition** — Add a sharpness/blur score (Laplacian variance) on the face crop before running ArcFace. If the crop is too blurry (e.g., due to motion), skip recognition for that frame. This prevents low-quality embeddings from polluting the temporal smoothing history.
-
-5. **Raise recognition threshold adaptively** — Instead of a fixed `RECOG_THRESHOLD`, use a per-identity calibrated threshold based on the variance of embeddings seen during enrollment.
-
----
-
-### ⚡ Performance & Smoothness
-
-6. **Frame skipping for detection** — Run YOLO detection every N frames (e.g., every 3rd frame) and reuse the bounding boxes from the previous detection for the intermediate frames. This drastically cuts CPU usage while keeping the stream feeling smooth to viewers.
-
-7. **Async recognition pipeline** — Decouple the RTSP reader, YOLO detector, and ArcFace recognizer into separate threads with queues between them. Currently they run sequentially in one loop; pipelining them would utilize multi-core CPUs much better.
-
-8. **Reduce JPEG quality for streaming** — The current MJPEG encoder uses quality=80. Dropping to 60–65 reduces per-frame bandwidth by ~40% with negligible visual difference for security monitoring purposes, resulting in a noticeably smoother stream over Tailscale.
-
-9. **WebRTC instead of MJPEG** — MJPEG streams are one-way and have no built-in congestion control. Migrating the stream endpoint to WebRTC (using `aiortc`) would give adaptive bitrate, sub-200ms latency, and proper browser support without polling.
-
-10. **Object tracking (ByteTrack/SORT)** — Replace the current grid-based spatial smoothing with a proper multi-object tracker. A tracker like ByteTrack maintains persistent IDs for each face across frames, eliminating the "identity flicker" problem more reliably than the current history-voting approach.
+### 🎯 Accuracy & Reliability
+- **Multi-angle Enrollment CLI**: Added `scripts/enroll_face.py`, allowing bulk enrollment of multiple photos per identity to improve recognition accuracy for non-frontal faces.
+- **Adaptive Recognition Thresholds**: Instead of a fixed global threshold, the system now computes a per-identity calibrated threshold based on the variance of their enrolled embeddings (tighter gates for consistent faces, looser gates for varied faces).
+- **Blur Quality Gate**: Computes a Laplacian variance score on face crops before recognition. Blurry/motion-blurred faces are skipped, preventing low-quality embeddings from polluting the temporal smoothing history.
+- **Persistent Tailscale**: Added a pre-auth key to the GitHub Actions deployment script so the VPN reconnects automatically after a VM reboot.
 
 ---
 
-### 🔐 Security & Reliability
+## 🔮 Future Roadmap
 
-11. **Add authentication to the API** — The `/stream` and `/faces` endpoints are currently open to anyone who knows the IP. Adding HTTP Basic Auth or a Bearer token check (via FastAPI's `Depends`) would prevent unauthorized access.
-
-12. **Persistent Tailscale on VM restart** — Tailscale's authentication expires after a period. Adding a pre-auth key (`tailscale up --authkey=<key>`) to the startup script ensures the VPN reconnects automatically after a VM reboot without manual intervention.
-
-13. **Alerting on unauthorized detection** — Add a webhook or push notification (e.g., via Firebase Cloud Messaging) that fires when an "Unauthorized" face is detected, enabling real-time security alerts to the mobile app.
+1. **Upgrade to a GPU VM** — Switch to a GPU-enabled VM (e.g., GCE `n1-standard-4` with a T4 GPU) to increase throughput from ~10-15 FPS to 30+ FPS (PyTorch and ONNX Runtime automatically use CUDA).
+2. **RetinaFace for Detection** — Replace the YOLO detector with RetinaFace to detect 5 facial landmarks (eyes, nose, mouth corners), enabling precise geometric alignment before ArcFace embedding.
+3. **WebRTC instead of MJPEG** — Migrate the stream endpoint to WebRTC (`aiortc`) for adaptive bitrate, sub-200ms latency, and better browser support.
+4. **API Authentication** — Add HTTP Basic Auth or Bearer token checks (via FastAPI's `Depends`) to secure the `/stream` and `/faces` endpoints.
+5. **Real-time Push Alerts** — Add a webhook or FCM integration that fires when an "Unauthorized" face is detected, enabling real-time security alerts to the mobile app.
 
 ---
 
