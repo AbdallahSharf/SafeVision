@@ -236,9 +236,9 @@ class FrameProcessor:
                             _do_recognize(embedding, track, (x1, y1, x2, y2)),
                             _db_loop
                         )
-                        
-                        # Use best known identity for this frame while we wait
-                        identity = track.smoothed_identity or "Checking..."
+                
+                # Always define identity (use smoothed identity from tracker)
+                identity = track.smoothed_identity or "Checking..."
                 score = track.last_score
 
             # ── Annotate ───────────────────────────────────────────────────
