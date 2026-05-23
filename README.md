@@ -452,15 +452,25 @@ We recently shipped a major update to the SafeVision pipeline to dramatically im
 - **Blur Quality Gate**: Computes a Laplacian variance score on face crops before recognition. Blurry/motion-blurred faces are skipped, preventing low-quality embeddings from polluting the temporal smoothing history.
 - **Persistent Tailscale**: Added a pre-auth key to the GitHub Actions deployment script so the VPN reconnects automatically after a VM reboot.
 
+### 🔐 Security & Infrastructure
+- **API Authentication**: Added HTTP Bearer Token checks (via FastAPI's `Depends`) to secure the `/stream`, `/faces`, and `/admin` endpoints.
+- **Real-time Push Alerts**: Added Firebase Cloud Messaging (FCM) integration. A webhook fires the exact millisecond an "Unauthorized" face is detected, sending a push notification and confidence score directly to the mobile app.
+- **GPU Deployment Prep**: Updated the `Dockerfile` to use the official PyTorch CUDA base image and configured the GitHub Actions deployment script to utilize NVIDIA GPUs.
+
 ---
 
-## 🔮 Future Roadmap
+## 🔮 Future Roadmap & Cost-Saving Tips
 
-1. **Upgrade to a GPU VM** — Switch to a GPU-enabled VM (e.g., GCE `n1-standard-4` with a T4 GPU) to increase throughput from ~10-15 FPS to 30+ FPS (PyTorch and ONNX Runtime automatically use CUDA).
+### 💰 Cost-Saving Tips for Google Cloud
+If you are running this as a personal or home project, you can drastically reduce your Google Cloud bill:
+1. **Use Spot Instances (-70% cost):** Change your VM Provisioning Model to "Spot". Google will run your VM on excess capacity at a huge discount. Because SafeVision uses Docker with `--restart unless-stopped`, if Google restarts your VM, the camera stream will automatically come back online.
+2. **Release your Static IP:** You are paying ~$3/mo for a static IP. Because the VM is connected to Tailscale, you can connect to the Tailscale `100.x.x.x` IP for free and release the public static IP.
+3. **Downgrade to Standard HDD:** You are currently using a 50GB SSD (~$8.50/mo). Since the AI models load directly into RAM on startup, you can recreate the VM using a Standard Persistent Disk to drop this cost to ~$2.00/mo without losing stream performance.
+
+### 🎯 Further AI Improvements
+1. **Upgrade to a GPU VM** — Switch to a GPU-enabled VM (e.g., GCE `n1-standard-4` with a T4 GPU in a supported zone like `europe-west4`) to increase throughput from ~15 FPS to 30+ FPS (PyTorch and ONNX Runtime automatically use CUDA). Note: You must request a GPU quota increase from Google Support first.
 2. **RetinaFace for Detection** — Replace the YOLO detector with RetinaFace to detect 5 facial landmarks (eyes, nose, mouth corners), enabling precise geometric alignment before ArcFace embedding.
 3. **WebRTC instead of MJPEG** — Migrate the stream endpoint to WebRTC (`aiortc`) for adaptive bitrate, sub-200ms latency, and better browser support.
-4. **API Authentication** — Add HTTP Basic Auth or Bearer token checks (via FastAPI's `Depends`) to secure the `/stream` and `/faces` endpoints.
-5. **Real-time Push Alerts** — Add a webhook or FCM integration that fires when an "Unauthorized" face is detected, enabling real-time security alerts to the mobile app.
 
 ---
 
