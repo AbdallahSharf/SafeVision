@@ -1,20 +1,21 @@
-# GPU-enabled base image with PyTorch and CUDA pre-installed
-FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+# Use the official, ultra-lightweight Python slim image
+FROM python:3.11-slim
 
-# System dependencies for OpenCV headless and FFmpeg (RTSP decoding)
+# System dependencies for OpenCV headless, FFmpeg (RTSP), and ONNXRuntime/TensorRT
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     ffmpeg \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /safevision
+WORKDIR /opt/safevision
 
-# Install Python dependencies
-# Strip out CPU torch/onnxruntime from requirements so we keep the CUDA versions
 COPY requirements.txt .
 RUN sed -i '/torch/d' requirements.txt && \
     sed -i '/onnxruntime/d' requirements.txt && \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu121 && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir onnxruntime-gpu
 
