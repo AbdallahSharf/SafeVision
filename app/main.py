@@ -5,12 +5,22 @@ Starts the FastAPI/Uvicorn server which in turn launches the background
 RTSP processing loop (see ``app.api``).
 """
 
+import os
+import subprocess
 import uvicorn
 
 from app.config import settings, logger
 
 
 def main() -> None:
+    engine_path = "models/best.engine"
+    if not os.path.exists(engine_path):
+        logger.info("YOLO TensorRT engine not found. Building it now (this may take a few minutes)...")
+        try:
+            subprocess.run(["python", "scripts/export_tensorrt.py"], check=True)
+        except Exception as e:
+            logger.error(f"Failed to build TensorRT engine: {e}")
+            
     logger.info(
         "Starting SafeVision API server on port %d …",
         settings.PORT,

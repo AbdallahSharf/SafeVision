@@ -81,6 +81,32 @@ class ArcFaceONNX:
         x = x.transpose(2, 0, 1)[np.newaxis, ...]          # (1,3,112,112)
         return self._session.run([self._output_name], {self._input_name: x})[0]
 
+    def get_feats(self, faces_rgb: list[np.ndarray]) -> np.ndarray:
+        """
+        Compute face embeddings for a batch of faces simultaneously.
+        
+        Parameters
+        ----------
+        faces_rgb : list of np.ndarray
+            List of H×W×3 uint8 RGB images, already resized to (112, 112).
+            
+        Returns
+        -------
+        np.ndarray shape (N, 512)
+        """
+        if not faces_rgb:
+            return np.empty((0, 512), dtype=np.float32)
+            
+        batch = []
+        for face_rgb in faces_rgb:
+            x = face_rgb.astype(np.float32)
+            x = (x - 127.5) / 128.0
+            x = x.transpose(2, 0, 1)
+            batch.append(x)
+            
+        x_batch = np.stack(batch, axis=0) # (N, 3, 112, 112)
+        return self._session.run([self._output_name], {self._input_name: x_batch})[0]
+
 
 # ---------------------------------------------------------------------------
 # Lazy-loading singletons

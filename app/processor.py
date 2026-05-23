@@ -173,7 +173,11 @@ class FrameProcessor:
             if track.smoothed_identity:
                 smoothed[track.track_id] = track.smoothed_identity
 
-        # For each active track, run ArcFace and update identity history
+        # Identify which tracks need to be recognized this frame
+        faces_to_recognize = []
+        tracks_to_recognize = []
+        boxes_to_recognize = []
+        
         for track in active_tracks:
             x1, y1, x2, y2 = map(int, track.bbox)
             face = frame[y1:y2, x1:x2]
@@ -187,63 +191,48 @@ class FrameProcessor:
                 identity = smoothed.get(track.track_id, "Unknown")
                 score = 0.0
             else:
-                # ── Frame Skipping for Recognition ─────────────────────────────
                 # Only run heavy ArcFace if this track has no identity yet,
-                # or periodically (every 15 frames) to verify they haven't swapped.
-                needs_recognition = not track.identity_history or (self._frame_count % 15 == 0)
+                # or periodically (staggered by track_id) to verify they haven't swapped.
+                needs_recognition = not track.identity_history or (self._frame_count % 15 == track.track_id % 15)
                 
                 if needs_recognition:
-                    # Pre-process + embed
+                    # Pre-process
                     face_enhanced = enhance_face(face)
                     face_resized = cv2.resize(face_enhanced, (settings.FACE_SIZE, settings.FACE_SIZE))
                     face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
-
-                    embedding = arcface.get_feat(face_rgb).flatten()
-                    norm = np.linalg.norm(embedding)
-                    if norm > 0:
-                        embedding = embedding / norm
-
-                        # ── Asynchronous Database Search ─────────────────────────
-                        async def _do_recognize(emb, trk, box):
-                            ident, scr = await async_recognize_face(emb)
-                            trk.identity_history.append(ident)
-                            trk.last_score = scr
-                            if ident == "Unauthorized":
-                                send_unauthorized_alert(scr, box)
-                        
-                        asyncio.run_coroutine_threadsafe(
-                            _do_recognize(embedding, track, (x1, y1, x2, y2)),
-                            _db_loop
-                        )
+                    
+                    faces_to_recognize.append(face_rgb)
+                    tracks_to_recognize.append(track)
+                    boxes_to_recognize.append((x1, y1, x2, y2))
                 
                 # Always define identity (use smoothed identity from tracker)
                 identity = track.smoothed_identity or "Checking..."
                 score = track.last_score
 
             # ── Annotate ───────────────────────────────────────────────────
-            color = (0, 255, 0) if identity not in ("Unauthorized", "Unknown") else (0, 0, 255)
+            color = (0, 255, 0) if identity not in ("Unauthorized", "Unknown", "Checking...") else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-            # Track ID badge (small, top-right of box)
-            cv2.putText(
-                frame,
-                f"#{track.track_id}",
-                (x2 - 30, y1 + 15),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (200, 200, 200),
-                1,
-            )
-
+            
             label = f"{identity} ({score:.2f})" if score > 0 else identity
             cv2.putText(
                 frame,
                 label,
-                (x1, y1 - 10),
+                (x1, max(10, y1 - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
                 color,
                 2,
+            )
+            
+            # Track ID badge (small, top-right of box)
+            cv2.putText(
+                frame,
+                f"#{track.track_id}",
+                (x2 - 30, max(15, y1 + 15)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (200, 200, 200),
+                1,
             )
 
             detected_faces.append(DetectedFace(
@@ -251,6 +240,30 @@ class FrameProcessor:
                 confidence=round(score, 4),
                 bbox=(x1, y1, x2, y2),
             ))
+
+        # ── Batch Inference (Multi-Face Optimization) ─────────────────────
+        if faces_to_recognize:
+            # Get embeddings for all faces simultaneously on the GPU
+            embeddings = arcface.get_feats(faces_to_recognize)
+            
+            for i, track in enumerate(tracks_to_recognize):
+                embedding = embeddings[i].flatten()
+                norm = np.linalg.norm(embedding)
+                if norm > 0:
+                    embedding = embedding / norm
+
+                    # ── Asynchronous Database Search ─────────────────────────
+                    async def _do_recognize(emb, trk, box):
+                        ident, scr = await async_recognize_face(emb)
+                        trk.identity_history.append(ident)
+                        trk.last_score = scr
+                        if ident == "Unauthorized":
+                            send_unauthorized_alert(scr, box)
+                    
+                    asyncio.run_coroutine_threadsafe(
+                        _do_recognize(embedding, track, boxes_to_recognize[i]),
+                        _db_loop
+                    )
 
         # Update recent faces buffer
         with self._lock:

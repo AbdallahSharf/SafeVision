@@ -61,8 +61,8 @@ _processor: FrameProcessor | None = None
 _start_time: float = 0.0
 
 # Inter-thread queues
-_rtsp_queue: queue.Queue = queue.Queue(maxsize=3)     # raw BGR frames
-_detect_queue: queue.Queue = queue.Queue(maxsize=3)   # (preprocessed_frame, boxes)
+_rtsp_queue: queue.Queue = queue.Queue(maxsize=1)     # raw BGR frames
+_detect_queue: queue.Queue = queue.Queue(maxsize=1)   # (preprocessed_frame, boxes)
 
 # Latest raw frame served to WebRTC clients
 _latest_raw_frame: np.ndarray | None = None
