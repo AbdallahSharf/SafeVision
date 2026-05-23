@@ -117,12 +117,15 @@ jobs:
             # Authenticate Docker to pull from Artifact Registry
             gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
 
-            # Pull the new image
-            docker pull "${FULL_IMAGE}"
-
             # Stop and remove old container gracefully
             docker stop safevision 2>/dev/null || true
             docker rm safevision 2>/dev/null || true
+
+            # Aggressively clean up all unused Docker images to save disk space BEFORE pulling
+            docker system prune -af
+
+            # Pull the new image
+            docker pull "${FULL_IMAGE}"
 
             # Start the new container
             docker run -d \
@@ -132,9 +135,6 @@ jobs:
               --gpus all \
               --env-file /opt/safevision/.env \
               "${FULL_IMAGE}"
-
-            # Aggressively clean up all unused Docker images to save disk space
-            docker system prune -af
 
             # Ensure Tailscale is authenticated and accepts subnet routes.
             # Uses a reusable pre-auth key so it reconnects automatically after VM reboots.
