@@ -45,6 +45,51 @@ def _run_db_loop():
 _db_thread = threading.Thread(target=_run_db_loop, daemon=True, name="sv-db-loop")
 _db_thread.start()
 
+import queue
+_inference_queue = queue.Queue(maxsize=100)
+
+def _run_inference_loop():
+    while True:
+        try:
+            item = _inference_queue.get()
+            if item is None:
+                continue
+            face_rgb, face_bgr, track, box = item
+            
+            # Lazy load inside thread to avoid block
+            arcface = get_arcface()
+            
+            # 1. GPU Inference
+            embedding = arcface.get_feat(face_rgb)[0].flatten()
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+
+                # 2. Async DB lookup
+                async def _do_recognize(emb, trk, bx, raw_face):
+                    try:
+                        ident, scr = await async_recognize_face(emb)
+                        trk.identity_history.append(ident)
+                        trk.last_score = scr
+                        if ident == "Unauthorized":
+                            send_unauthorized_alert(scr, bx, raw_face)
+                    finally:
+                        trk.is_recognizing = False
+                
+                asyncio.run_coroutine_threadsafe(
+                    _do_recognize(embedding, track, box, face_bgr),
+                    _db_loop
+                )
+            else:
+                track.is_recognizing = False
+        except Exception as exc:
+            logger.error("Inference thread error: %s", exc)
+            if 'track' in locals() and hasattr(track, 'is_recognizing'):
+                track.is_recognizing = False
+
+_inference_thread = threading.Thread(target=_run_inference_loop, daemon=True, name="sv-inference")
+_inference_thread.start()
+
 # ---------------------------------------------------------------------------
 # Data classes for structured results
 # ---------------------------------------------------------------------------
@@ -161,7 +206,7 @@ class FrameProcessor:
         Runs in the recognizer thread, consuming (frame, boxes) pairs
         produced by the detector thread.
         """
-        arcface = get_arcface()
+        # No longer lazy-loading arcface here because it's done in the background thread
         detected_faces: List[DetectedFace] = []
 
         # Update tracker with current detections
@@ -174,10 +219,6 @@ class FrameProcessor:
                 smoothed[track.track_id] = track.smoothed_identity
 
         # Identify which tracks need to be recognized this frame
-        faces_to_recognize = []
-        tracks_to_recognize = []
-        boxes_to_recognize = []
-        
         for track in active_tracks:
             x1, y1, x2, y2 = map(int, track.bbox)
             face = frame[y1:y2, x1:x2]
@@ -207,9 +248,11 @@ class FrameProcessor:
                     face_resized = cv2.resize(face_enhanced, (settings.FACE_SIZE, settings.FACE_SIZE))
                     face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
                     
-                    faces_to_recognize.append(face_rgb)
-                    tracks_to_recognize.append(track)
-                    boxes_to_recognize.append((x1, y1, x2, y2))
+                    try:
+                        _inference_queue.put_nowait((face_rgb, face.copy(), track, (x1, y1, x2, y2)))
+                    except queue.Full:
+                        logger.warning("Inference queue full — dropping face")
+                        track.is_recognizing = False
                 
                 # Always define identity (use smoothed identity from tracker)
                 identity = track.smoothed_identity or "Checking..."
@@ -246,33 +289,6 @@ class FrameProcessor:
                 confidence=round(score, 4),
                 bbox=(x1, y1, x2, y2),
             ))
-
-        # ── Batch Inference (Multi-Face Optimization) ─────────────────────
-        if faces_to_recognize:
-            # Get embeddings for all faces simultaneously on the GPU
-            embeddings = arcface.get_feats(faces_to_recognize)
-            
-            for i, track in enumerate(tracks_to_recognize):
-                embedding = embeddings[i].flatten()
-                norm = np.linalg.norm(embedding)
-                if norm > 0:
-                    embedding = embedding / norm
-
-                    # ── Asynchronous Database Search ─────────────────────────
-                    async def _do_recognize(emb, trk, box):
-                        try:
-                            ident, scr = await async_recognize_face(emb)
-                            trk.identity_history.append(ident)
-                            trk.last_score = scr
-                            if ident == "Unauthorized":
-                                send_unauthorized_alert(scr, box)
-                        finally:
-                            trk.is_recognizing = False
-                    
-                    asyncio.run_coroutine_threadsafe(
-                        _do_recognize(embedding, track, boxes_to_recognize[i]),
-                        _db_loop
-                    )
 
         # Update recent faces buffer
         with self._lock:

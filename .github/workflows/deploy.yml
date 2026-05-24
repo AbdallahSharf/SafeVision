@@ -127,12 +127,17 @@ jobs:
             # Pull the new image
             docker pull "${FULL_IMAGE}"
 
+            # Ensure the directory for unauthorized faces exists on the host
+            sudo mkdir -p /opt/safevision/unauthorized_faces
+            sudo chmod 777 /opt/safevision/unauthorized_faces
+
             # Start the new container
             docker run -d \
               --name safevision \
               --restart unless-stopped \
               --network host \
               --gpus all \
+              -v /opt/safevision/unauthorized_faces:/opt/safevision/unauthorized_faces \
               --env-file /opt/safevision/.env \
               "${FULL_IMAGE}"
 

@@ -26,9 +26,14 @@ def init_firebase():
         except Exception as exc:
             logger.error("Failed to initialize Firebase: %s", exc)
 
-def send_unauthorized_alert(confidence: float, bbox: tuple) -> None:
+import cv2
+import uuid
+import os
+from datetime import datetime
+
+def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray) -> None:
     """
-    Send an FCM notification when an unauthorized face is detected.
+    Send an FCM notification when an unauthorized face is detected and save the photo to the VM.
     
     Parameters
     ----------
@@ -36,7 +41,24 @@ def send_unauthorized_alert(confidence: float, bbox: tuple) -> None:
         Recognition score (how confident we are it's unauthorized, or top score).
     bbox : tuple
         (x1, y1, x2, y2) of the detected face.
+    face_img : np.ndarray
+        The BGR image crop of the face.
     """
+    # ── Save image to VM storage ───────────────────────────────────────
+    image_path = ""
+    try:
+        # Create directory just in case it doesn't exist yet inside container
+        os.makedirs("/opt/safevision/unauthorized_faces", exist_ok=True)
+        
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"unauthorized_{timestamp_str}_{uuid.uuid4().hex[:8]}.jpg"
+        image_path = os.path.join("/opt/safevision/unauthorized_faces", filename)
+        
+        cv2.imwrite(image_path, face_img)
+        logger.info(f"Saved unauthorized face photo to {image_path}")
+    except Exception as exc:
+        logger.error(f"Failed to save unauthorized face photo: {exc}")
+
     if not _initialized or not settings.FCM_TOPIC:
         return
         
@@ -49,7 +71,8 @@ def send_unauthorized_alert(confidence: float, bbox: tuple) -> None:
             data={
                 "bbox": str(bbox),
                 "confidence": str(confidence),
-                "type": "unauthorized_access"
+                "type": "unauthorized_access",
+                "image_path": image_path
             },
             topic=settings.FCM_TOPIC,
         )
