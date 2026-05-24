@@ -151,10 +151,13 @@ def _recognizer_loop() -> None:
                 break
             continue
 
-        result = _processor.recognize_and_annotate(frame, boxes)
+        try:
+            result = _processor.recognize_and_annotate(frame, boxes)
 
-        with _frame_lock:
-            _latest_raw_frame = result.annotated
+            with _frame_lock:
+                _latest_raw_frame = result.annotated
+        except Exception as exc:
+            logger.error("Recognizer thread error: %s", exc)
 
     logger.info("Recognizer thread exited.")
 

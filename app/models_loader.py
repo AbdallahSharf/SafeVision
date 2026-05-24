@@ -97,15 +97,11 @@ class ArcFaceONNX:
         if not faces_rgb:
             return np.empty((0, 512), dtype=np.float32)
             
-        batch = []
+        feats = []
         for face_rgb in faces_rgb:
-            x = face_rgb.astype(np.float32)
-            x = (x - 127.5) / 128.0
-            x = x.transpose(2, 0, 1)
-            batch.append(x)
+            feats.append(self.get_feat(face_rgb)[0])
             
-        x_batch = np.stack(batch, axis=0) # (N, 3, 112, 112)
-        return self._session.run([self._output_name], {self._input_name: x_batch})[0]
+        return np.stack(feats, axis=0)
 
 
 # ---------------------------------------------------------------------------
