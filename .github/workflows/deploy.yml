@@ -110,6 +110,11 @@ jobs:
           echo "${SSH_PRIVATE_KEY}" > /tmp/gce_key
           chmod 600 /tmp/gce_key
 
+          if [ -z "${VM_IP}" ]; then
+            echo "ERROR: VM_IP is empty. Is the VM currently running?"
+            exit 1
+          fi
+
           # SSH into the VM and run deployment commands
           ssh -o StrictHostKeyChecking=no -i /tmp/gce_key "Abdallah@${VM_IP}" << EOF
             set -e
@@ -142,10 +147,9 @@ jobs:
               "${FULL_IMAGE}"
 
             # Ensure Tailscale is authenticated and accepts subnet routes.
-            # Uses a reusable pre-auth key so it reconnects automatically after VM reboots.
             if [ -n "${TAILSCALE_AUTHKEY}" ]; then
               sudo tailscale up --authkey="${TAILSCALE_AUTHKEY}" --accept-routes --reset || true
-              echo "Tailscale: $(sudo tailscale status --json | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"BackendState\", \"unknown\"))')"
+              echo "Tailscale: \$(sudo tailscale status --json | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"BackendState\", \"unknown\"))')"
             fi
           EOF
 
