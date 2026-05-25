@@ -163,11 +163,14 @@ class FrameProcessor:
         (preprocessed_frame, boxes)
             boxes is a list of (x1, y1, x2, y2) tuples — one per detected face.
         """
-        yolo = get_yolo()
-
         frame = cv2.resize(raw_frame, (settings.FRAME_WIDTH, settings.FRAME_HEIGHT))
         frame = enhance_frame(frame)
 
+        self._frame_idx += 1
+        if self._frame_idx % settings.DETECT_EVERY_N != 0:
+            return frame, self._cached_boxes
+
+        yolo = get_yolo()
         results = yolo(
             frame,
             conf=settings.YOLO_CONF_THRESHOLD,
@@ -192,6 +195,7 @@ class FrameProcessor:
                 y2 = min(h, y2 + settings.FACE_MARGIN)
                 boxes.append((x1, y1, x2, y2))
 
+        self._cached_boxes = boxes
         return frame, boxes
 
     # ── Stage 2: Recognition + Annotation ────────────────────────────────
