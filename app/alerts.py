@@ -30,6 +30,7 @@ import cv2
 import uuid
 import os
 from datetime import datetime
+import numpy as np
 
 def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray) -> None:
     """
