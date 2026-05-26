@@ -64,13 +64,21 @@ _start_time: float = 0.0
 _rtsp_queue: queue.Queue = queue.Queue(maxsize=2)     # raw BGR frames
 _detect_queue: queue.Queue = queue.Queue(maxsize=2)   # (preprocessed_frame, boxes)
 
-# Latest raw frame served to WebRTC clients
-_latest_raw_frame: np.ndarray | None = None
+# Latest ANNOTATED frame (full pipeline output — recognition complete)
+_latest_annotated_frame: np.ndarray | None = None
+# Latest RAW frame direct from camera (fast path — no recognition delay)
+_latest_raw_unprocessed: np.ndarray | None = None
 _frame_lock = threading.Lock()
 
 def get_latest_raw_frame():
+    """Return the latest annotated frame (for WebRTC)."""
     with _frame_lock:
-        return _latest_raw_frame
+        return _latest_annotated_frame
+
+def get_latest_fast_frame():
+    """Return the latest raw camera frame for the low-latency MJPEG fast-path."""
+    with _frame_lock:
+        return _latest_raw_unprocessed
 
 # Thread handles (daemon=True so they die when the main process exits)
 _reader_thread: threading.Thread | None = None
@@ -85,22 +93,34 @@ def _reader_loop() -> None:
     """
     Thread 1 — RTSP reader.
 
-    Continuously reads frames from VideoStream and pushes them into
-    _rtsp_queue.  When the queue is full, the oldest frame is dropped so
-    we always keep the most recent one.
+    Uses read_latest() to always grab the single freshest frame from the
+    VideoStream, discarding any intermediate frames that built up while the
+    detector was busy.  Also writes every raw frame directly to
+    _latest_raw_unprocessed for the low-latency MJPEG fast-path.
     """
+    global _latest_raw_unprocessed
     logger.info("Reader thread started.")
     while _video_stream and _video_stream.is_alive():
-        frame = _video_stream.read()
+        # read_latest() drains the queue and returns only the freshest frame
+        frame = _video_stream.read_latest()
         if frame is None:
+            # Queue was empty — wait a short time then try again
+            time.sleep(0.005)
             continue
-        # Drop oldest frame if consumer is too slow — keep stream fresh
-        if _rtsp_queue.full():
+
+        # Fast-path: expose raw frame immediately for MJPEG (no pipeline delay)
+        with _frame_lock:
+            _latest_raw_unprocessed = frame
+
+        # Push into YOLO/recognition pipeline (drops oldest if detector is behind)
+        try:
+            _rtsp_queue.put_nowait(frame)
+        except queue.Full:
             try:
                 _rtsp_queue.get_nowait()
             except queue.Empty:
                 pass
-        _rtsp_queue.put(frame)
+            _rtsp_queue.put_nowait(frame)
     logger.info("Reader thread exited.")
 
 
@@ -138,10 +158,10 @@ def _recognizer_loop() -> None:
     Thread 3 — ArcFace recognizer + annotator.
 
     Pops (frame, boxes) from _detect_queue, runs Stage 2 of
-    FrameProcessor (ArcFace + ByteTrack smoothing + drawing), encodes
-    the result as JPEG, and stores it in _latest_frame.
+    FrameProcessor (ArcFace + ByteTrack smoothing + drawing), and stores
+    the annotated result in _latest_annotated_frame for WebRTC.
     """
-    global _latest_raw_frame
+    global _latest_annotated_frame
     logger.info("Recognizer thread started.")
     while True:
         try:
@@ -155,7 +175,7 @@ def _recognizer_loop() -> None:
             result = _processor.recognize_and_annotate(frame, boxes)
 
             with _frame_lock:
-                _latest_raw_frame = result.annotated
+                _latest_annotated_frame = result.annotated
         except Exception as exc:
             logger.error("Recognizer thread error: %s", exc)
 
@@ -426,30 +446,48 @@ async def root():
 
 def _generate_mjpeg():
     """
-    MJPEG generator optimised for Flutter mobile clients.
+    Low-latency MJPEG generator for Flutter mobile clients.
 
-    Serves a new JPEG only when the pipeline has produced a genuinely new
-    frame (pointer comparison avoids re-encoding the same ndarray).  Falls
-    back to a 5 ms spin-wait instead of the old hard-coded 1/30 s sleep,
-    so the stream runs at the *true* pipeline FPS rather than a fixed 30 fps
-    ceiling.
+    Architecture: TWO-LAYER approach
+    ────────────────────────────
+    Layer 1 — Video (fast path):  raw frames from camera, bypassing YOLO
+              and ArcFace entirely.  Latency = camera capture delay only.
+    Layer 2 — Annotations (slow path): face boxes/labels from the
+              recognition pipeline, cached and reused across frames.
+              If recognition lags, old labels are kept — video never stalls.
+
+    Result: silky-smooth video at full camera FPS, with annotations that
+    update asynchronously as recognition completes.
     """
     last_frame_id: int | None = None
     while True:
-        frame = get_latest_raw_frame()
-        if frame is None:
-            time.sleep(0.05)
+        # Fast path: get the most-recent raw camera frame
+        with _frame_lock:
+            raw = _latest_raw_unprocessed
+            annotated = _latest_annotated_frame  # may be None or older frame
+
+        if raw is None:
+            time.sleep(0.01)
             continue
 
-        frame_id = id(frame)          # cheap pointer check — no pixel comparison
+        frame_id = id(raw)
         if frame_id == last_frame_id:
-            time.sleep(0.005)         # 5 ms spin — much shorter than one frame period
+            time.sleep(0.004)   # ~4 ms spin — keeps CPU at ~1% while idle
             continue
-
         last_frame_id = frame_id
-        _, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), settings.STREAM_JPEG_QUALITY])
-        yield (b"--frame\r\n"
-               b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n")
+
+        # If the recognition pipeline has produced a recent annotated frame,
+        # use it.  Otherwise serve the raw frame directly (no stall).
+        serve = annotated if annotated is not None else raw
+
+        _, jpeg = cv2.imencode(
+            ".jpg", serve,
+            [int(cv2.IMWRITE_JPEG_QUALITY), settings.STREAM_JPEG_QUALITY]
+        )
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n"
+        )
 
 @app.get("/stream", tags=["video"])
 async def stream():

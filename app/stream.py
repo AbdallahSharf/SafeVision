@@ -31,6 +31,12 @@ class VideoStream:
         self._queue_size = queue_size or settings.QUEUE_SIZE
 
         self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+        # ── Critical: kill OpenCV's internal frame buffer ──────────────────
+        # By default OpenCV buffers 4–10 decoded frames internally, creating
+        # 130–330 ms of hidden latency even before our queue code runs.
+        # Setting BUFFERSIZE=1 means only the single most-recent decoded frame
+        # is kept; older frames are discarded immediately.
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not self.cap.isOpened():
             logger.warning("Cannot open RTSP stream at startup: %s. Will keep retrying.", self.rtsp_url)
 
@@ -48,6 +54,7 @@ class VideoStream:
                 if not self.cap.isOpened():
                     logger.warning("Stream lost — reconnecting …")
                     self.cap.open(self.rtsp_url)
+                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # re-apply after reconnect
                     time.sleep(1)
                     fail_count = 0
                     continue
@@ -89,6 +96,22 @@ class VideoStream:
         except queue.Empty:
             logger.warning("Frame queue timed out — stream may be stalled.")
             return None
+
+    def read_latest(self):
+        """
+        Return the single most-recent frame without blocking.
+
+        Drains the entire queue and returns only the last item, discarding
+        any intermediate frames that piled up.  Returns ``None`` if the
+        queue is currently empty.
+        """
+        latest = None
+        while True:
+            try:
+                latest = self.q.get_nowait()
+            except queue.Empty:
+                break
+        return latest
 
     def is_alive(self) -> bool:
         """Return ``True`` if the background thread is still running."""
