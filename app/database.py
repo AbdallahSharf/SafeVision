@@ -44,6 +44,7 @@ try:
     async_client = AsyncIOMotorClient(settings.MONGO_URI, serverSelectionTimeoutMS=5000)
     async_db = async_client["unidbb"]
     async_faces_collection = async_db["faces"]
+    async_alerts_collection = async_db["alerts"]
 except Exception as exc:
     logger.critical("Cannot connect Async Motor to MongoDB: %s", exc)
     raise SystemExit(1) from exc

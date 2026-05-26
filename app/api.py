@@ -595,6 +595,21 @@ async def recent_faces(limit: int = 20):
     return {"faces": _processor.get_recent_faces(limit=limit)}
 
 
+from fastapi.staticfiles import StaticFiles
+import os
+from app.database import async_alerts_collection
+
+# Create image directory if it doesn't exist
+os.makedirs("/opt/safevision/unauthorized_faces", exist_ok=True)
+app.mount("/images", StaticFiles(directory="/opt/safevision/unauthorized_faces"), name="images")
+
+@app.get("/alerts", tags=["monitoring"], dependencies=[Depends(verify_token)])
+async def get_alerts(limit: int = 20):
+    """Return the most recent unauthorized access alerts for the mobile app history view."""
+    cursor = async_alerts_collection.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit)
+    alerts = await cursor.to_list(length=limit)
+    return {"alerts": alerts}
+
 @app.post("/admin/reload-thresholds", tags=["admin"], dependencies=[Depends(verify_token)])
 async def admin_reload_thresholds():
     """

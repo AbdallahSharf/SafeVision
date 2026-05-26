@@ -32,7 +32,9 @@ import os
 from datetime import datetime
 import numpy as np
 
-def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray) -> None:
+from app.database import async_alerts_collection
+
+async def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray) -> None:
     """
     Send an FCM notification when an unauthorized face is detected and save the photo to the VM.
     
@@ -46,7 +48,7 @@ def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray
         The BGR image crop of the face.
     """
     # ── Save image to VM storage ───────────────────────────────────────
-    image_path = ""
+    filename = ""
     try:
         # Create directory just in case it doesn't exist yet inside container
         os.makedirs("/opt/safevision/unauthorized_faces", exist_ok=True)
@@ -57,8 +59,18 @@ def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray
         
         cv2.imwrite(image_path, face_img)
         logger.info(f"Saved unauthorized face photo to {image_path}")
+
+        # ── Save to Alerts Database ────────────────────────────────────────
+        alert_doc = {
+            "timestamp": datetime.now(),
+            "confidence": confidence,
+            "image_filename": filename,
+            "type": "unauthorized"
+        }
+        await async_alerts_collection.insert_one(alert_doc)
+
     except Exception as exc:
-        logger.error(f"Failed to save unauthorized face photo: {exc}")
+        logger.error(f"Failed to save unauthorized alert: {exc}")
 
     if not _initialized or not settings.FCM_TOPIC:
         return
@@ -73,7 +85,7 @@ def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray
                 "bbox": str(bbox),
                 "confidence": str(confidence),
                 "type": "unauthorized_access",
-                "image_path": image_path
+                "image_filename": filename
             },
             topic=settings.FCM_TOPIC,
         )

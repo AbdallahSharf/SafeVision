@@ -91,7 +91,7 @@ def _run_inference_loop():
                             trk.identity_history.append(ident)
                             trk.last_score = scr
                             if ident == "Unauthorized":
-                                send_unauthorized_alert(scr, bx, raw_face)
+                                await send_unauthorized_alert(scr, bx, raw_face)
                         finally:
                             trk.is_recognizing = False
 
