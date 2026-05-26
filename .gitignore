@@ -24,3 +24,9 @@ safevision.log
 # OS
 .DS_Store
 Thumbs.db
+
+# Model weights — stored in GCS, downloaded at Docker build time
+# Do NOT commit .pt / .onnx / .engine — they caused Git LFS quota failures
+models/*.pt
+models/*.onnx
+models/*.engine

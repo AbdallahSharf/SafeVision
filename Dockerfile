@@ -19,10 +19,23 @@ RUN sed -i '/torch/d' requirements.txt && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir onnxruntime-gpu
 
-# Copy application code and model weights
+# Copy application code
 COPY app/ ./app/
-COPY models/ ./models/
 COPY scripts/ ./scripts/
+
+# Download model weights from Google Cloud Storage at build time.
+# Models are stored in GCS instead of Git LFS to avoid LFS bandwidth quota limits.
+# GCS_MODELS_BUCKET build-arg must be set (e.g. gs://safevision-models/models).
+ARG GCS_MODELS_BUCKET
+RUN if [ -z "${GCS_MODELS_BUCKET}" ]; then \
+      echo "ERROR: GCS_MODELS_BUCKET build-arg is required (e.g. gs://my-bucket/models)" && exit 1; \
+    fi && \
+    pip install --no-cache-dir gsutil && \
+    mkdir -p models && \
+    gsutil -m cp "${GCS_MODELS_BUCKET}/best.pt" models/best.pt && \
+    gsutil -m cp "${GCS_MODELS_BUCKET}/w600k_r50.onnx" models/w600k_r50.onnx && \
+    echo "Models downloaded successfully." && \
+    pip uninstall -y gsutil
 
 # Headless mode — no GUI on a server
 ENV DISPLAY_OUTPUT=false
