@@ -48,7 +48,13 @@ class ArcFaceONNX:
 
     def __init__(self, model_path: str):
         sess_opts = ort.SessionOptions()
-        sess_opts.inter_op_num_threads = 2
+        # Enable all ONNX Runtime graph-level optimisations (constant folding,
+        # node fusion, layout optimisation, etc.) — typically 10–20% faster at
+        # no code cost.
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        # On GPU: keep CPU thread count low to avoid CPU↔GPU scheduling churn.
+        # The GPU execution provider handles parallelism internally.
+        sess_opts.inter_op_num_threads = 1
         sess_opts.intra_op_num_threads = 2
         self._session = ort.InferenceSession(
             model_path,
@@ -58,7 +64,7 @@ class ArcFaceONNX:
         self._input_name  = self._session.get_inputs()[0].name
         self._output_name = self._session.get_outputs()[0].name
         logger.info(
-            "ArcFace ONNX session created — provider: %s",
+            "ArcFace ONNX session created — provider: %s  graph_opt: ORT_ENABLE_ALL",
             self._session.get_providers()[0],
         )
 

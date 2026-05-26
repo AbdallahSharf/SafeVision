@@ -84,7 +84,7 @@ class Settings:
     FACE_SIZE:     int   = int(os.environ.get("FACE_SIZE",     "112"))
     FACE_MARGIN:   int   = int(os.environ.get("FACE_MARGIN",   "20"))
     IMGSZ:         int   = int(os.environ.get("IMGSZ",         "640"))
-    QUEUE_SIZE:    int   = int(os.environ.get("QUEUE_SIZE",     "5"))
+    QUEUE_SIZE:    int   = int(os.environ.get("QUEUE_SIZE",     "2"))
     HISTORY_LEN:   int   = int(os.environ.get("HISTORY_LEN",   "5"))
     QUEUE_TIMEOUT: float = float(os.environ.get("QUEUE_TIMEOUT", "2.0"))
 
@@ -103,8 +103,9 @@ class Settings:
 
     # ── Frame skipping ────────────────────────────────────────────────────
     # Run YOLO detection only once every N frames; reuse boxes for the rest.
-    # Higher = faster, but bounding boxes lag slightly on fast movement.
-    DETECT_EVERY_N: int = int(os.environ.get("DETECT_EVERY_N", "3"))
+    # Lower = faster bbox updates (better for high-motion), higher = more CPU/GPU headroom.
+    # At 30 fps: DETECT_EVERY_N=2 → YOLO runs at ~15 fps (good balance on GPU).
+    DETECT_EVERY_N: int = int(os.environ.get("DETECT_EVERY_N", "2"))
 
     # ── Low-light enhancement ─────────────────────────────────────────────
     LOW_LIGHT_ENABLE:         bool  = os.environ.get("LOW_LIGHT_ENABLE", "true").lower() == "true"

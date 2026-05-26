@@ -49,43 +49,68 @@ import queue
 _inference_queue = queue.Queue(maxsize=100)
 
 def _run_inference_loop():
+    """
+    Background inference thread.
+
+    Drains up to BATCH_SIZE items from the queue per iteration so that
+    multiple faces visible simultaneously are processed in a single batched
+    ONNX call (``get_feats``).  On GPU this takes nearly the same wall-clock
+    time as a single face, giving a proportional throughput improvement.
+    """
+    BATCH_SIZE = 4
     while True:
         try:
-            item = _inference_queue.get()
-            if item is None:
+            # Block on the first item, then greedily drain more without waiting
+            items = [_inference_queue.get()]
+            if items[0] is None:
                 continue
-            face_rgb, face_bgr, track, box = item
-            
-            # Lazy load inside thread to avoid block
-            arcface = get_arcface()
-            
-            # 1. GPU Inference
-            embedding = arcface.get_feat(face_rgb)[0].flatten()
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
+            while len(items) < BATCH_SIZE:
+                try:
+                    extra = _inference_queue.get_nowait()
+                    if extra is not None:
+                        items.append(extra)
+                except queue.Empty:
+                    break
 
-                # 2. Async DB lookup
-                async def _do_recognize(emb, trk, bx, raw_face):
-                    try:
-                        ident, scr = await async_recognize_face(emb)
-                        trk.identity_history.append(ident)
-                        trk.last_score = scr
-                        if ident == "Unauthorized":
-                            send_unauthorized_alert(scr, bx, raw_face)
-                    finally:
-                        trk.is_recognizing = False
-                
-                asyncio.run_coroutine_threadsafe(
-                    _do_recognize(embedding, track, box, face_bgr),
-                    _db_loop
-                )
-            else:
-                track.is_recognizing = False
+            arcface = get_arcface()
+            faces_rgb = [it[0] for it in items]
+
+            # Single batched ONNX inference call — much cheaper than N individual calls
+            embeddings = arcface.get_feats(faces_rgb)  # shape (N, 512)
+
+            for (face_rgb, face_bgr, track, box), embedding in zip(items, embeddings):
+                embedding = embedding.flatten()
+                norm = np.linalg.norm(embedding)
+                if norm > 0:
+                    embedding = embedding / norm
+
+                    # 2. Async DB lookup
+                    async def _do_recognize(emb, trk, bx, raw_face):
+                        try:
+                            ident, scr = await async_recognize_face(emb)
+                            trk.identity_history.append(ident)
+                            trk.last_score = scr
+                            if ident == "Unauthorized":
+                                send_unauthorized_alert(scr, bx, raw_face)
+                        finally:
+                            trk.is_recognizing = False
+
+                    asyncio.run_coroutine_threadsafe(
+                        _do_recognize(embedding, track, box, face_bgr),
+                        _db_loop
+                    )
+                else:
+                    track.is_recognizing = False
+
         except Exception as exc:
             logger.error("Inference thread error: %s", exc)
-            if 'track' in locals() and hasattr(track, 'is_recognizing'):
-                track.is_recognizing = False
+            # Best-effort: release any locks held by items in this batch
+            for it in locals().get("items", []):
+                try:
+                    if hasattr(it[2], 'is_recognizing'):
+                        it[2].is_recognizing = False
+                except Exception:
+                    pass
 
 _inference_thread = threading.Thread(target=_run_inference_loop, daemon=True, name="sv-inference")
 _inference_thread.start()
@@ -229,8 +254,19 @@ class FrameProcessor:
             if face.size == 0:
                 continue
 
-            # ── Blur quality gate (Phase 1) ────────────────────────────────
-            blur_score = cv2.Laplacian(face, cv2.CV_64F).var()
+            # ── Blur quality gate — cached per track ────────────────────────
+            # Recompute only every 5 frames: blur changes slowly, and
+            # cv2.Laplacian on a crop costs 3–8 ms each call.
+            _blur_stale = (
+                not hasattr(track, '_blur_cache_frame')
+                or (self._frame_count - track._blur_cache_frame) >= 5
+            )
+            if _blur_stale:
+                blur_score = cv2.Laplacian(face, cv2.CV_64F).var()
+                track._blur_score = blur_score
+                track._blur_cache_frame = self._frame_count
+            else:
+                blur_score = track._blur_score
             if blur_score < settings.BLUR_THRESHOLD:
                 # Still annotate with last known identity if available
                 identity = smoothed.get(track.track_id, "Unknown")

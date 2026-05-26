@@ -60,9 +60,9 @@ _video_stream: VideoStream | None = None
 _processor: FrameProcessor | None = None
 _start_time: float = 0.0
 
-# Inter-thread queues
-_rtsp_queue: queue.Queue = queue.Queue(maxsize=1)     # raw BGR frames
-_detect_queue: queue.Queue = queue.Queue(maxsize=1)   # (preprocessed_frame, boxes)
+# Inter-thread queues — size 2 gives a one-frame burst cushion without accumulating lag
+_rtsp_queue: queue.Queue = queue.Queue(maxsize=2)     # raw BGR frames
+_detect_queue: queue.Queue = queue.Queue(maxsize=2)   # (preprocessed_frame, boxes)
 
 # Latest raw frame served to WebRTC clients
 _latest_raw_frame: np.ndarray | None = None
@@ -354,8 +354,23 @@ WEBRTC_HTML = """
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
 
-            // Wait a moment for ICE candidates to gather (trickle ICE is better, but this is simpler)
-            await new Promise(resolve => setTimeout(resolve, 500));
+            // Wait for ICE gathering to complete (event-driven — no fixed sleep).
+            // On a local network this typically finishes in < 100 ms vs the old 500 ms blind wait.
+            await new Promise(resolve => {
+                if (pc.iceGatheringState === 'complete') {
+                    resolve();
+                } else {
+                    const onStateChange = () => {
+                        if (pc.iceGatheringState === 'complete') {
+                            pc.removeEventListener('icegatheringstatechange', onStateChange);
+                            resolve();
+                        }
+                    };
+                    pc.addEventListener('icegatheringstatechange', onStateChange);
+                    // Safety cap: 3 s max wait (handles complex NAT / TURN scenarios)
+                    setTimeout(resolve, 3000);
+                }
+            });
 
             try {
                 const response = await fetch('/offer', {
@@ -410,18 +425,31 @@ async def root():
 
 
 def _generate_mjpeg():
+    """
+    MJPEG generator optimised for Flutter mobile clients.
+
+    Serves a new JPEG only when the pipeline has produced a genuinely new
+    frame (pointer comparison avoids re-encoding the same ndarray).  Falls
+    back to a 5 ms spin-wait instead of the old hard-coded 1/30 s sleep,
+    so the stream runs at the *true* pipeline FPS rather than a fixed 30 fps
+    ceiling.
+    """
+    last_frame_id: int | None = None
     while True:
         frame = get_latest_raw_frame()
         if frame is None:
             time.sleep(0.05)
             continue
-        
-        # Encode as JPEG
+
+        frame_id = id(frame)          # cheap pointer check — no pixel comparison
+        if frame_id == last_frame_id:
+            time.sleep(0.005)         # 5 ms spin — much shorter than one frame period
+            continue
+
+        last_frame_id = frame_id
         _, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), settings.STREAM_JPEG_QUALITY])
         yield (b"--frame\r\n"
                b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n")
-        # Yield to allow other tasks (approx matching the camera FPS)
-        time.sleep(1 / 30.0)
 
 @app.get("/stream", tags=["video"])
 async def stream():

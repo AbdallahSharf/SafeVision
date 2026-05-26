@@ -63,15 +63,17 @@ class VideoStream:
                     continue
 
                 fail_count = 0
-                
-                # Drop oldest frame if the consumer is too slow
-                if self.q.full():
+
+                # Fast path: try to enqueue immediately (one lock acquisition)
+                try:
+                    self.q.put_nowait(frame)
+                except queue.Full:
+                    # Queue full — drain oldest stale frame, then put the fresh one
                     try:
                         self.q.get_nowait()
                     except queue.Empty:
                         pass
-
-                self.q.put(frame)
+                    self.q.put_nowait(frame)
 
             except Exception as exc:
                 logger.error("Stream thread error: %s", exc)
