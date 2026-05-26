@@ -1,31 +1,23 @@
-# =============================================================================
-# SafeVision — CI/CD Pipeline
-# =============================================================================
-# Triggers on every push to main:
-#   1. Syncs model files to GCS (skip if already up to date)
-#   2. Builds Docker image (downloads models from GCS — no LFS)
-#   3. Pushes to Google Artifact Registry
-#   4. SSHs into GCE VM to pull & restart the container
+# SafeVision CI/CD Pipeline
+# Triggers on push to main OR manual "Run workflow" button click.
+# Models are stored in GCS (not Git LFS) to avoid LFS quota issues.
 #
 # Required GitHub Secrets:
-#   GCP_PROJECT_ID      — Google Cloud project ID (e.g. safevision-00)
-#   GCP_WIF_PROVIDER    — Workload Identity Provider resource name
-#   GCP_SA_EMAIL        — Service account email
-#   GCE_VM_NAME         — VM name (e.g. safevision-vm)
-#   GCE_VM_ZONE         — VM zone (e.g. me-west1-a)
-#   GCE_SSH_PRIVATE_KEY — Private SSH key to connect to the VM
-#   GCS_MODELS_BUCKET   — GCS path to models dir (e.g. gs://safevision-models/models)
-#
-# NOTE: GCP_REGION is NOT a secret — it is hardcoded in env below.
-# NOTE: Models are in GCS, NOT Git LFS. The checkout step has no lfs:true.
-# =============================================================================
+#   GCP_PROJECT_ID      - Google Cloud project ID
+#   GCP_WIF_PROVIDER    - Workload Identity Provider resource name
+#   GCP_SA_EMAIL        - Service account email
+#   GCE_VM_NAME         - VM instance name
+#   GCE_VM_ZONE         - VM zone (e.g. me-west1-a)
+#   GCE_SSH_PRIVATE_KEY - SSH private key for the VM
+#   GCS_MODELS_BUCKET   - GCS path (e.g. gs://safevision-models/models)
+#   TAILSCALE_AUTHKEY   - Tailscale auth key (optional)
 
 name: Deploy to Google Compute Engine
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:   # enables "Run workflow" button in GitHub Actions UI
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -35,7 +27,7 @@ env:
 
 jobs:
   deploy:
-    name: Build & Deploy
+    name: Build and Deploy
     runs-on: ubuntu-latest
 
     permissions:
@@ -43,11 +35,9 @@ jobs:
       id-token: write
 
     steps:
-      # ── 1. Checkout code — NO lfs:true (models are in GCS, not LFS) ───────
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ── 2. Authenticate with Google Cloud ─────────────────────────────────
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -57,24 +47,19 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      # ── 3. Sync local models/ to GCS (no-op if files unchanged) ───────────
-      # On the very first run this uploads the models. After that it's a
-      # fast checksum comparison — only changed files are re-uploaded.
       - name: Sync model files to GCS
         run: |
           if [ -d "models" ] && [ "$(ls -A models/ 2>/dev/null)" ]; then
-            echo "Syncing model files to GCS..."
+            echo "Syncing models to GCS..."
             gsutil -m rsync -r -c models/ ${{ secrets.GCS_MODELS_BUCKET }}/
-            echo "✅ Models synced."
+            echo "Models synced."
           else
-            echo "ℹ️  No local models/ — assuming already in GCS."
+            echo "No local models dir - assuming already in GCS."
           fi
 
-      # ── 4. Configure Docker for Artifact Registry ─────────────────────────
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
 
-      # ── 5. Free up disk space on runner ───────────────────────────────────
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -86,7 +71,6 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      # ── 6. Build Docker image (downloads models from GCS during build) ─────
       - name: Build Docker image
         run: |
           FULL_IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}"
@@ -96,14 +80,12 @@ jobs:
             -t "${FULL_IMAGE}:latest" \
             .
 
-      # ── 7. Push Docker image ──────────────────────────────────────────────
       - name: Push Docker image
         run: |
           FULL_IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}"
           docker push "${FULL_IMAGE}:${{ github.sha }}"
           docker push "${FULL_IMAGE}:latest"
 
-      # ── 8. Get VM's external IP ───────────────────────────────────────────
       - name: Get VM external IP
         id: get-ip
         run: |
@@ -112,9 +94,8 @@ jobs:
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
           echo "vm_ip=${VM_IP}" >> $GITHUB_OUTPUT
-          echo "VM external IP: ${VM_IP}"
+          echo "VM IP: ${VM_IP}"
 
-      # ── 9. SSH into VM and deploy ─────────────────────────────────────────
       - name: Deploy to Compute Engine via SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.GCE_SSH_PRIVATE_KEY }}
@@ -125,12 +106,10 @@ jobs:
         run: |
           echo "${SSH_PRIVATE_KEY}" > /tmp/gce_key
           chmod 600 /tmp/gce_key
-
           if [ -z "${VM_IP}" ]; then
             echo "ERROR: VM_IP is empty. Is the VM running?"
             exit 1
           fi
-
           ssh -o StrictHostKeyChecking=no -i /tmp/gce_key "Abdallah@${VM_IP}" <<EOF
             set -e
             gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
@@ -150,25 +129,19 @@ jobs:
               "${FULL_IMAGE}"
             if [ -n "${TAILSCALE_AUTHKEY}" ]; then
               sudo tailscale up --authkey="${TAILSCALE_AUTHKEY}" --accept-routes --reset || true
-              echo "Tailscale: \$(sudo tailscale status --json | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"BackendState\", \"unknown\"))')"
             fi
           EOF
-
           rm /tmp/gce_key
 
-      # ── 10. Verify deployment ─────────────────────────────────────────────
       - name: Verify deployment
         env:
           VM_IP: ${{ steps.get-ip.outputs.vm_ip }}
         run: |
-          echo "✅ Deployed! Endpoints:"
-          echo "   Stream: http://${VM_IP}:8080/stream"
-          echo "   Health: http://${VM_IP}:8080/health"
-          echo "   Status: http://${VM_IP}:8080/status"
-          echo "Waiting 90 seconds for models to load..."
+          echo "Deployed! Stream: http://${VM_IP}:8080/stream"
+          echo "Waiting 90s for models to load..."
           sleep 90
           if curl --fail --silent --max-time 10 "http://${VM_IP}:8080/health"; then
-            echo "✅ Health check passed!"
+            echo "Health check passed!"
           else
-            echo "⚠️ Health check pending — check: docker logs safevision"
+            echo "Health check pending - run: docker logs safevision"
           fi
