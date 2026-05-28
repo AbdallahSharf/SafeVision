@@ -7,6 +7,8 @@ dist/
 build/
 venv/
 .venv/
+test-env/
+venv2/
 
 # Environment (secrets — NEVER commit)
 .env

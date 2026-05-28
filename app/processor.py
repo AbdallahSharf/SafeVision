@@ -5,13 +5,13 @@ Phase 2 refactor: the single process() method is now split into two stages
 so they can run in separate threads (see api.py):
 
   Stage 1 — detect(frame)
-      Runs YOLO every DETECT_EVERY_N frames (frame skipping from Phase 1).
-      Returns the raw frame + list of bounding boxes.
+      Runs YOLO on every frame for maximum tracking accuracy.
+      Returns the preprocessed frame + list of bounding boxes.
 
-  Stage 2 — recognize_and_annotate(frame, boxes)
+  Stage 2 — recognize_faces(frame, boxes)
       Runs the blur gate, ArcFace embedding, MongoDB vector search, and
-      ByteTrack-based temporal smoothing.  Draws bounding boxes and labels.
-      Returns a ProcessedFrame ready for MJPEG encoding.
+      ByteTrack-based temporal smoothing.
+      Returns an AIResult containing detected faces and FPS.
 """
 
 from app.config import settings
@@ -129,10 +129,9 @@ class DetectedFace:
 
 
 @dataclass
-class ProcessedFrame:
-    """Result of processing a single video frame."""
+class AIResult:
+    """Result of AI processing on a frame."""
 
-    annotated: np.ndarray  # BGR frame with bounding boxes drawn
     faces: List[DetectedFace] = field(default_factory=list)
     fps: float = 0.0
 
@@ -147,7 +146,7 @@ class FrameProcessor:
     The pipeline is split into two stages for the async 3-thread architecture:
 
       1. detect(frame) → (preprocessed_frame, boxes)      [YOLO, runs in Thread 2]
-      2. recognize_and_annotate(frame, boxes) → ProcessedFrame  [ArcFace, Thread 3]
+      2. recognize_faces(frame, boxes) → AIResult         [ArcFace, Thread 3]
     """
 
     def __init__(self):
@@ -156,10 +155,6 @@ class FrameProcessor:
             iou_threshold=0.3,
             max_lost_frames=8,
         )
-
-        # Frame skipping — YOLO runs every DETECT_EVERY_N frames
-        self._frame_idx: int = 0
-        self._cached_boxes: List[Tuple] = []   # boxes from last YOLO run
 
         # FPS tracking
         self._frame_count = 0
@@ -191,10 +186,6 @@ class FrameProcessor:
         frame = cv2.resize(raw_frame, (settings.FRAME_WIDTH, settings.FRAME_HEIGHT))
         frame = enhance_frame(frame)
 
-        self._frame_idx += 1
-        if self._frame_idx % settings.DETECT_EVERY_N != 0:
-            return frame, self._cached_boxes
-
         yolo = get_yolo()
         results = yolo(
             frame,
@@ -220,17 +211,16 @@ class FrameProcessor:
                 y2 = min(h, y2 + settings.FACE_MARGIN)
                 boxes.append((x1, y1, x2, y2))
 
-        self._cached_boxes = boxes
         return frame, boxes
 
-    # ── Stage 2: Recognition + Annotation ────────────────────────────────
-    def recognize_and_annotate(
+    # ── Stage 2: Recognition ─────────────────────────────────────────────
+    def recognize_faces(
         self,
         frame: np.ndarray,
         boxes: List[Tuple],
-    ) -> "ProcessedFrame":
+    ) -> AIResult:
         """
-        Stage 2 — ArcFace recognition + ByteTrack smoothing + annotation.
+        Stage 2 — ArcFace recognition + ByteTrack smoothing.
 
         Runs in the recognizer thread, consuming (frame, boxes) pairs
         produced by the detector thread.
@@ -298,32 +288,6 @@ class FrameProcessor:
                 identity = track.smoothed_identity or "Checking..."
                 score = track.last_score
 
-            # ── Annotate ───────────────────────────────────────────────────
-            color = (0, 255, 0) if identity not in ("Unauthorized", "Unknown", "Checking...") else (0, 0, 255)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            
-            label = f"{identity} ({score:.2f})" if score > 0 else identity
-            cv2.putText(
-                frame,
-                label,
-                (x1, max(10, y1 - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                color,
-                2,
-            )
-            
-            # Track ID badge (small, top-right of box)
-            cv2.putText(
-                frame,
-                f"#{track.track_id}",
-                (x2 - 30, max(15, y1 + 15)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (200, 200, 200),
-                1,
-            )
-
             detected_faces.append(DetectedFace(
                 name=identity,
                 confidence=round(score, 4),
@@ -342,28 +306,16 @@ class FrameProcessor:
             self._fps_time = now
             self._frame_count = 0
 
-        # Draw FPS overlay
-        cv2.putText(
-            frame,
-            f"FPS: {self._fps:.1f}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (255, 255, 0),
-            2,
-        )
-
-        return ProcessedFrame(
-            annotated=frame,
+        return AIResult(
             faces=detected_faces,
             fps=round(self._fps, 2),
         )
 
     # ── Convenience wrapper (used by tests / local dev) ──────────────────
-    def process(self, frame: np.ndarray) -> ProcessedFrame:
+    def process(self, frame: np.ndarray) -> AIResult:
         """Run both stages sequentially (single-threaded path)."""
         preprocessed, boxes = self.detect(frame)
-        return self.recognize_and_annotate(preprocessed, boxes)
+        return self.recognize_faces(preprocessed, boxes)
 
     # ── Properties ────────────────────────────────────────────────────────
     @property

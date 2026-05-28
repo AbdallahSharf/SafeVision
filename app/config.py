@@ -102,11 +102,8 @@ class Settings:
     BLUR_THRESHOLD: float = float(os.environ.get("BLUR_THRESHOLD", "80.0"))
 
     # ── Frame skipping ────────────────────────────────────────────────────
-    # Run YOLO detection only once every N frames; reuse boxes for the rest.
-    # Lower = faster bbox updates (better for high-motion), higher = more CPU/GPU headroom.
-    # At 30 fps: DETECT_EVERY_N=2 → YOLO runs at ~15 fps (good balance on GPU).
-    DETECT_EVERY_N: int = int(os.environ.get("DETECT_EVERY_N", "2"))
-
+    # (Removed to ensure accurate tracking and maximize GPU utilization)
+    
     # ── Low-light enhancement ─────────────────────────────────────────────
     LOW_LIGHT_ENABLE:         bool  = os.environ.get("LOW_LIGHT_ENABLE", "true").lower() == "true"
     LOW_LIGHT_AUTO_THRESHOLD: int   = int(os.environ.get("LOW_LIGHT_AUTO_THRESHOLD", "80"))

@@ -16,11 +16,12 @@ three concurrent threads connected by bounded queues:
 
   Thread 3 — _recognizer_loop()
       Pops (frame, boxes) from _detect_queue, runs Stage 2 of
-      FrameProcessor (ArcFace + tracker + annotation), JPEG-encodes the
-      result, and stores it in _latest_frame for the MJPEG endpoint.
+      FrameProcessor (ArcFace + tracker), and stores the result
+      in _latest_ai_results.
 
-This pipeline means all three stages run simultaneously on different CPU
-cores, roughly doubling throughput compared to the serial approach.
+The MJPEG generator runs independently, pulling the freshest raw frame
+from Thread 1 and the latest AI results from Thread 3, guaranteeing
+zero-latency video.
 
 Endpoints
 ---------
@@ -64,16 +65,11 @@ _start_time: float = 0.0
 _rtsp_queue: queue.Queue = queue.Queue(maxsize=2)     # raw BGR frames
 _detect_queue: queue.Queue = queue.Queue(maxsize=2)   # (preprocessed_frame, boxes)
 
-# Latest ANNOTATED frame (full pipeline output — recognition complete)
-_latest_annotated_frame: np.ndarray | None = None
-# Latest RAW frame direct from camera (fast path — no recognition delay)
+# Latest AI results (faces, names, boxes)
+_latest_ai_results: list = []
+# Latest RAW frame direct from camera (fast path)
 _latest_raw_unprocessed: np.ndarray | None = None
 _frame_lock = threading.Lock()
-
-def get_latest_raw_frame():
-    """Return the latest annotated frame (for WebRTC)."""
-    with _frame_lock:
-        return _latest_annotated_frame
 
 def get_latest_fast_frame():
     """Return the latest raw camera frame for the low-latency MJPEG fast-path."""
@@ -155,13 +151,13 @@ def _detector_loop() -> None:
 
 def _recognizer_loop() -> None:
     """
-    Thread 3 — ArcFace recognizer + annotator.
+    Thread 3 — ArcFace recognizer.
 
     Pops (frame, boxes) from _detect_queue, runs Stage 2 of
-    FrameProcessor (ArcFace + ByteTrack smoothing + drawing), and stores
-    the annotated result in _latest_annotated_frame for WebRTC.
+    FrameProcessor (ArcFace + ByteTrack smoothing), and stores
+    the result in _latest_ai_results.
     """
-    global _latest_annotated_frame
+    global _latest_ai_results
     logger.info("Recognizer thread started.")
     while True:
         try:
@@ -172,10 +168,10 @@ def _recognizer_loop() -> None:
             continue
 
         try:
-            result = _processor.recognize_and_annotate(frame, boxes)
+            result = _processor.recognize_faces(frame, boxes)
 
             with _frame_lock:
-                _latest_annotated_frame = result.annotated
+                _latest_ai_results = result.faces
         except Exception as exc:
             logger.error("Recognizer thread error: %s", exc)
 
@@ -216,7 +212,6 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down …")
     if _video_stream:
         _video_stream.stop()
-    await on_shutdown()
     logger.info("Shutdown complete.")
 
 
@@ -240,19 +235,6 @@ app.add_middleware(
 )
 
 
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from app.webrtc import SafeVisionTrack
-
-# Global set to keep track of active WebRTC peer connections
-_pcs = set()
-
-async def on_shutdown():
-    # Close all WebRTC connections gracefully
-    coros = [pc.close() for pc in _pcs]
-    await asyncio.gather(*coros)
-    _pcs.clear()
-
-
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
@@ -270,162 +252,6 @@ def verify_token(credentials: HTTPAuthorizationCredentials | None = Depends(secu
             detail="Invalid or missing authentication token",
         )
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-
-from fastapi.responses import HTMLResponse
-
-WEBRTC_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SafeVision Ultra-Low Latency</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
-    <style>
-        body { margin: 0; background-color: #0f172a; color: white; font-family: 'Inter', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; overflow: hidden; }
-        .container { background: rgba(30, 41, 59, 0.7); padding: 24px; border-radius: 20px; backdrop-filter: blur(16px); box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6); border: 1px solid rgba(255, 255, 255, 0.05); width: 90%; max-width: 1000px; }
-        .video-wrapper { position: relative; width: 100%; border-radius: 12px; overflow: hidden; background: #000; box-shadow: 0 4px 20px rgba(0,0,0,0.5); aspect-ratio: 16 / 9; }
-        video { width: 100%; height: 100%; object-fit: contain; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-        .title-group { display: flex; align-items: center; gap: 12px; }
-        .title { font-size: 1.5rem; font-weight: 600; margin: 0; background: linear-gradient(135deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .badge { background: rgba(56, 189, 248, 0.1); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.2); padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
-        .status { display: flex; align-items: center; gap: 10px; font-size: 0.9rem; color: #94a3b8; font-weight: 600; background: rgba(0,0,0,0.2); padding: 8px 16px; border-radius: 12px; }
-        .dot { width: 10px; height: 10px; border-radius: 50%; background-color: #ef4444; transition: all 0.3s ease; box-shadow: 0 0 10px rgba(239, 68, 68, 0.5); }
-        .dot.connected { background-color: #22c55e; box-shadow: 0 0 12px #22c55e; }
-        .btn { background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; border: none; padding: 8px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; font-family: inherit; }
-        .btn:hover { background: linear-gradient(135deg, #60a5fa, #3b82f6); transform: translateY(-2px); box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4); }
-        .btn:active { transform: translateY(0); }
-        .loader { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); display: none; flex-direction: column; align-items: center; gap: 12px; color: #94a3b8; font-weight: 600; }
-        .spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.1); border-top-color: #38bdf8; border-radius: 50%; animation: spin 1s linear infinite; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <div class="title-group">
-                <h1 class="title">SafeVision WebRTC</h1>
-                <span class="badge">Zero Latency</span>
-            </div>
-            <div class="status">
-                <div class="dot" id="status-dot"></div>
-                <span id="status-text">Disconnected</span>
-                <button class="btn" onclick="start()">Reconnect</button>
-            </div>
-        </div>
-        <div class="video-wrapper">
-            <div class="loader" id="loader">
-                <div class="spinner"></div>
-                <span>Negotiating connection...</span>
-            </div>
-            <video id="video" autoplay playsinline muted></video>
-        </div>
-    </div>
-
-    <script>
-        let pc = null;
-
-        async function start() {
-            const statusText = document.getElementById('status-text');
-            const statusDot = document.getElementById('status-dot');
-            const loader = document.getElementById('loader');
-            const video = document.getElementById('video');
-            
-            statusText.innerText = 'Connecting...';
-            statusDot.classList.remove('connected');
-            loader.style.display = 'flex';
-            video.style.opacity = '0.5';
-            
-            if (pc) {
-                pc.close();
-            }
-
-            pc = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-            });
-            
-            pc.addEventListener('track', (evt) => {
-                if (evt.track.kind === 'video') {
-                    video.srcObject = evt.streams[0];
-                }
-            });
-
-            pc.addEventListener('connectionstatechange', () => {
-                if (pc.connectionState === 'connected') {
-                    statusText.innerText = 'Live';
-                    statusDot.classList.add('connected');
-                    loader.style.display = 'none';
-                    video.style.opacity = '1';
-                } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                    statusText.innerText = 'Disconnected';
-                    statusDot.classList.remove('connected');
-                    loader.style.display = 'none';
-                }
-            });
-
-            // We only want to receive video
-            pc.addTransceiver('video', { direction: 'recvonly' });
-
-            // Create offer
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-
-            // Wait for ICE gathering to complete (event-driven — no fixed sleep).
-            // On a local network this typically finishes in < 100 ms vs the old 500 ms blind wait.
-            await new Promise(resolve => {
-                if (pc.iceGatheringState === 'complete') {
-                    resolve();
-                } else {
-                    const onStateChange = () => {
-                        if (pc.iceGatheringState === 'complete') {
-                            pc.removeEventListener('icegatheringstatechange', onStateChange);
-                            resolve();
-                        }
-                    };
-                    pc.addEventListener('icegatheringstatechange', onStateChange);
-                    // Safety cap: 3 s max wait (handles complex NAT / TURN scenarios)
-                    setTimeout(resolve, 3000);
-                }
-            });
-
-            try {
-                const response = await fetch('/offer', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        sdp: pc.localDescription.sdp,
-                        type: pc.localDescription.type
-                    })
-                });
-
-                if (!response.ok) throw new Error('Failed to get answer');
-                
-                const answer = await response.json();
-                await pc.setRemoteDescription(answer);
-            } catch (err) {
-                console.error('Signaling error:', err);
-                statusText.innerText = 'Connection Error';
-                statusDot.classList.remove('connected');
-                loader.style.display = 'none';
-            }
-        }
-        
-        // Auto-start connection on page load
-        window.addEventListener('load', start);
-    </script>
-</body>
-</html>
-"""
-
-@app.get("/player", tags=["video"])
-async def webrtc_player():
-    """Returns a beautiful HTML page that automatically connects to the WebRTC stream."""
-    return HTMLResponse(content=WEBRTC_HTML)
-
 @app.get("/", tags=["info"])
 async def root():
     """API information."""
@@ -435,36 +261,30 @@ async def root():
         "description": "Real-time face recognition security system",
         "endpoints": {
             "/stream": "Live MJPEG video stream",
-            "/player": "WebRTC Video Player (Browser interface)",
             "/health": "Health check",
             "/status": "System status & metrics",
             "/faces":  "Recently recognised faces",
-            "/offer":  "WebRTC offer endpoint",
         },
     }
 
 
 def _generate_mjpeg():
     """
-    Low-latency MJPEG generator for Flutter mobile clients.
+    Low-latency MJPEG generator.
 
-    Architecture: TWO-LAYER approach
+    Architecture: Decoupled AI streaming
     ────────────────────────────
-    Layer 1 — Video (fast path):  raw frames from camera, bypassing YOLO
-              and ArcFace entirely.  Latency = camera capture delay only.
-    Layer 2 — Annotations (slow path): face boxes/labels from the
-              recognition pipeline, cached and reused across frames.
-              If recognition lags, old labels are kept — video never stalls.
-
-    Result: silky-smooth video at full camera FPS, with annotations that
-    update asynchronously as recognition completes.
+    The generator pulls the absolute freshest raw frame from the camera,
+    scales it, draws the latest known bounding boxes on it, and sends it.
+    This runs completely asynchronously to the AI pipeline, guaranteeing
+    a smooth stream (e.g. 30 FPS) even if the AI is processing at 15 FPS.
     """
     last_frame_id: int | None = None
     while True:
-        # Fast path: get the most-recent raw camera frame
         with _frame_lock:
             raw = _latest_raw_unprocessed
-            annotated = _latest_annotated_frame  # may be None or older frame
+            ai_results = list(_latest_ai_results)  # shallow copy for thread safety
+            current_fps = _processor.fps if _processor else 0.0
 
         if raw is None:
             time.sleep(0.01)
@@ -472,13 +292,33 @@ def _generate_mjpeg():
 
         frame_id = id(raw)
         if frame_id == last_frame_id:
-            time.sleep(0.004)   # ~4 ms spin — keeps CPU at ~1% while idle
+            time.sleep(0.004)   # ~4 ms spin — keeps CPU low while waiting for a new frame
             continue
         last_frame_id = frame_id
 
-        # If the recognition pipeline has produced a recent annotated frame,
-        # use it.  Otherwise serve the raw frame directly (no stall).
-        serve = annotated if annotated is not None else raw
+        # Resize to match the AI bounding box coordinate space
+        serve = cv2.resize(raw, (settings.FRAME_WIDTH, settings.FRAME_HEIGHT))
+        
+        # Draw the latest AI results on the frame
+        for face in ai_results:
+            x1, y1, x2, y2 = face.bbox
+            identity = face.name
+            score = face.confidence
+            
+            color = (0, 255, 0) if identity not in ("Unauthorized", "Unknown", "Checking...") else (0, 0, 255)
+            cv2.rectangle(serve, (x1, y1), (x2, y2), color, 2)
+            
+            label = f"{identity} ({score:.2f})" if score > 0 else identity
+            cv2.putText(
+                serve, label, (x1, max(10, y1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2
+            )
+
+        # Draw AI FPS overlay
+        cv2.putText(
+            serve, f"AI FPS: {current_fps:.1f}", (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2
+        )
 
         _, jpeg = cv2.imencode(
             ".jpg", serve,
@@ -551,40 +391,6 @@ async def status():
     }
 
 
-from pydantic import BaseModel
-import asyncio
-
-class WebRTCOffer(BaseModel):
-    sdp: str
-    type: str
-
-@app.post("/offer", tags=["video"])
-async def webrtc_offer(offer: WebRTCOffer):
-    """
-    WebRTC endpoint for ultra-low latency video streaming.
-    
-    Accepts an SDP offer and returns an SDP answer.
-    """
-    pc = RTCPeerConnection()
-    _pcs.add(pc)
-    
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange():
-        if pc.connectionState == "failed" or pc.connectionState == "closed":
-            _pcs.discard(pc)
-
-    # Attach our custom SafeVision video track
-    pc.addTrack(SafeVisionTrack())
-
-    # Set the remote description
-    offer_sdp = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
-    await pc.setRemoteDescription(offer_sdp)
-    
-    # Create and set the local description
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-    
-    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
 
 
 @app.get("/faces", tags=["recognition"], dependencies=[Depends(verify_token)])
