@@ -381,7 +381,6 @@ async def status():
         "uptime_seconds": round(time.time() - _start_time, 1),
         "config": {
             "frame_size": f"{settings.FRAME_WIDTH}x{settings.FRAME_HEIGHT}",
-            "detect_every_n": settings.DETECT_EVERY_N,
             "jpeg_quality": settings.STREAM_JPEG_QUALITY,
             "blur_threshold": settings.BLUR_THRESHOLD,
             "yolo_conf": settings.YOLO_CONF_THRESHOLD,

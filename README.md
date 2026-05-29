@@ -2,12 +2,13 @@
 
 **Real-time AI-powered face recognition security system.**
 
-SafeVision processes a live RTSP camera feed, detects faces using a custom YOLO model, recognizes identities via ArcFace embeddings matched against a MongoDB Atlas vector database, and streams the annotated video to mobile applications in real time.
+SafeVision processes a live RTSP camera feed, detects faces using a custom YOLO model, recognizes identities via ArcFace embeddings matched against a MongoDB Atlas vector database, and streams the annotated video in real time over a pure MJPEG endpoint.
 
-![Python](https://img.shields.io/badge/Python-3.10-blue?logo=python)
+![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi)
 ![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)
-![GCP](https://img.shields.io/badge/Google%20Cloud-GCE-4285F4?logo=googlecloud)
+![GCP](https://img.shields.io/badge/Google%20Cloud-GPU%20VM-4285F4?logo=googlecloud)
+![NVIDIA](https://img.shields.io/badge/NVIDIA-Tesla%20T4-76B900?logo=nvidia)
 ![Tailscale](https://img.shields.io/badge/Tailscale-VPN-0e8a8a?logo=tailscale)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -16,53 +17,67 @@ SafeVision processes a live RTSP camera feed, detects faces using a custom YOLO 
 ## 🏗️ Architecture
 
 ```
-┌──────────────┐  RTSP (TCP)  ┌─────────────────────────────────────┐
-│  IP Camera   │─────────────▶│         SafeVision Server           │
-│ 192.168.1.9  │  Tailscale   │                                     │
-└──────────────┘    VPN       │  ┌───────────┐   ┌──────────────┐  │
-                              │  │ YOLO Face │──▶│  ArcFace     │  │
-                              │  │ Detector  │   │  Embedder    │  │
-                              │  └───────────┘   └──────┬───────┘  │
-                              │                         │          │
-                              │  ┌──────────────────────▼───────┐  │
-                              │  │ MongoDB Atlas Vector Search  │  │
-                              │  └──────────────────────────────┘  │
-                              │                                     │
-                              │  ┌──────────────────────────────┐  │
-                              │  │  FastAPI (MJPEG + REST API)  │  │
-                              │  └──────────────┬───────────────┘  │
-                              └─────────────────┼──────────────────┘
-                                                │
-                             ┌──────────────────┼──────────────────┐
-                             │                  │                  │
-                        GET /stream        GET /faces        GET /status
-                             │                  │                  │
-                        ┌────▼────┐       ┌─────▼─────┐     ┌─────▼─────┐
-                        │ Mobile  │       │  Mobile   │     │ Monitor   │
-                        │  App    │       │  App      │     │ Dashboard │
-                        │ (Video) │       │ (Data)    │     │           │
-                        └─────────┘       └───────────┘     └───────────┘
+┌──────────────┐  RTSP (TCP)  ┌──────────────────────────────────────────────────────────┐
+│  IP Camera   │─────────────▶│                  SafeVision Server                       │
+│ 192.168.1.x  │  Tailscale   │                                                          │
+└──────────────┘    VPN       │   Thread 1 — RTSP Reader                                 │
+                              │   ┌──────────────────────────────────────────────┐        │
+                              │   │  VideoStream.read_latest() → raw BGR frame   │        │
+                              │   └────────────────────┬─────────────────────────┘        │
+                              │                        │ _rtsp_queue (maxsize=2)           │
+                              │   Thread 2 — YOLO Detector                               │
+                              │   ┌────────────────────▼─────────────────────────┐        │
+                              │   │  YOLO(best.pt / best.onnx) → bounding boxes  │        │
+                              │   └────────────────────┬─────────────────────────┘        │
+                              │                        │ _detect_queue (maxsize=2)         │
+                              │   Thread 3 — ArcFace Recognizer                          │
+                              │   ┌────────────────────▼─────────────────────────┐        │
+                              │   │  ArcFace ONNX → embedding → MongoDB search   │        │
+                              │   └────────────────────┬─────────────────────────┘        │
+                              │                        │ _latest_ai_results               │
+                              │   MJPEG Generator (decoupled from AI pipeline)           │
+                              │   ┌────────────────────▼─────────────────────────┐        │
+                              │   │  raw frame + overlay latest AI boxes → JPEG  │        │
+                              │   └────────────────────┬─────────────────────────┘        │
+                              └────────────────────────┼─────────────────────────────────┘
+                                                       │
+                               ┌───────────────────────┼───────────────────────┐
+                               │                       │                       │
+                          GET /stream            GET /faces               GET /status
+                               │                       │                       │
+                          ┌────▼────┐           ┌──────▼──────┐         ┌──────▼──────┐
+                          │ Mobile  │           │   Mobile    │         │  Monitoring │
+                          │  App    │           │  App (Data) │         │  Dashboard  │
+                          │ (Video) │           └─────────────┘         └─────────────┘
+                          └─────────┘
 ```
+
+---
 
 ## ✨ Features
 
-- **Real-time face detection** — Custom YOLO model optimized for faces
-- **Face recognition** — ArcFace (InsightFace) with MongoDB Atlas vector search
-- **Live video streaming** — MJPEG endpoint consumable by mobile apps and browsers
-- **Low-light enhancement** — Automatic CLAHE + gamma correction + denoising
-- **Temporal smoothing** — Reduces flickering identity labels across frames
-- **Offline camera resilience** — Server stays online and shows a placeholder if the camera disconnects
-- **REST API** — Health checks, status metrics, and recent faces endpoint
+- **Pure MJPEG streaming** — Ultra-low-latency stream consumable by any browser or mobile app
+- **Decoupled AI pipeline** — MJPEG generator runs independently from YOLO + ArcFace, guaranteeing smooth video even when AI inference lags
+- **Custom YOLO face detector** — Fine-tuned on face data for high-precision detection
+- **ArcFace recognition** — 512-d embeddings via ONNX Runtime (CUDA-accelerated), matched against MongoDB Atlas vector search
+- **ByteTrack-style IoU tracking** — Each face gets a persistent integer ID across frames, eliminating identity flicker
+- **Adaptive recognition thresholds** — Per-identity calibrated thresholds based on enrollment embedding variance
+- **Blur quality gate** — Skips recognition on blurry/motion-blurred face crops to avoid polluting identity history
+- **Batch ArcFace inference** — Multiple visible faces processed in a single ONNX batched call
+- **Low-light enhancement** — CLAHE + gamma correction + optional denoising
+- **Firebase push alerts** — Real-time push notification fires when an unauthorized face is detected
+- **Offline camera resilience** — Server stays online and shows a placeholder frame if the camera disconnects
+- **REST API** — Health checks, status metrics, recent faces, and admin endpoints
 - **Docker-ready** — Single command to build and deploy
-- **CI/CD** — GitHub Actions auto-deploys to Google Compute Engine on every push to `main`
-- **Secure camera tunnel** — Tailscale VPN connects the cloud server to the local camera without port forwarding
+- **GPU-accelerated** — Runs on an NVIDIA Tesla T4 on Google Cloud (me-west1-b)
+- **CI/CD** — GitHub Actions auto-builds and pushes Docker images on every push to `main`
 
 ---
 
 ## 🧰 Tech Stack & Why We Chose It
 
-### 🐍 Python 3.10
-The de facto language for AI/ML. Its ecosystem — PyTorch, OpenCV, InsightFace — made it the only practical choice. Version 3.10 specifically was chosen for its union type hints (`X | Y`) and stability with the pinned library versions.
+### 🐍 Python 3.11
+The de facto language for AI/ML. Its ecosystem — PyTorch, OpenCV, ONNX Runtime — made it the only practical choice. Version 3.11 gives a measurable performance uplift over 3.10 due to the Faster CPython project.
 
 ### ⚡ FastAPI
 FastAPI serves dual duty: it streams MJPEG video frames and exposes REST endpoints. We chose it over Flask because:
@@ -71,32 +86,31 @@ FastAPI serves dual duty: it streams MJPEG video frames and exposes REST endpoin
 - **Pydantic validation** — Strict typing catches bugs early.
 
 ### 🤖 YOLOv11 (Ultralytics) — Face Detection
-YOLO (You Only Look Once) is a single-shot object detector that runs in real time even on CPU. We use a **custom-trained** YOLO model (`best.pt`) specifically fine-tuned on face data, so it detects faces with much higher precision than a generic YOLO model. It outperforms alternatives like Haar cascades (too many false positives) and MTCNN (too slow for real-time video).
+YOLO (You Only Look Once) is a single-shot object detector that runs in real time. We use a **custom-trained** YOLO model (`best.pt`) specifically fine-tuned on face data. It runs on CUDA via PyTorch and produces an ONNX export for TensorRT compatibility.
 
-### 🧠 ArcFace via InsightFace (ONNX) — Face Recognition
-ArcFace is a state-of-the-art face recognition model that produces 512-dimensional embeddings. We load the pre-trained `w600k_r50.onnx` (trained on 600k identities, ResNet-50 backbone) via ONNX Runtime. The reason for ONNX is portability: the same weights run identically on CPU or GPU without code changes, and ONNX Runtime is significantly faster than a full PyTorch inference path for single-image inference.
+### 🧠 ArcFace (w600k_r50.onnx) — Face Recognition
+ArcFace is state-of-the-art face recognition producing 512-dimensional embeddings. We load the pre-trained `w600k_r50.onnx` (ResNet-50 backbone, trained on 600k identities) **directly via ONNX Runtime**, eliminating the `insightface` Cython dependency entirely. ONNX Runtime runs transparently on CUDAExecutionProvider for GPU acceleration.
 
 ### 🍃 MongoDB Atlas — Vector Database
-After ArcFace produces a 512-float embedding for a detected face, we need to find the closest match in our identity database. MongoDB Atlas's **$vectorSearch** operator does this in a single database query using Approximate Nearest Neighbour (ANN) search — no separate vector database like Pinecone or Weaviate is needed. This simplifies the stack and reduces cost.
+After ArcFace produces an embedding, we find the closest match using MongoDB Atlas's **$vectorSearch** (ANN search) — no separate vector database like Pinecone is needed.
 
 ### 🐳 Docker
-The entire application (Python, OpenCV, PyTorch, models) is containerized into a single image. This guarantees identical behavior between local development and the cloud VM, and eliminates the classic "works on my machine" problem. The image is stored in **Google Artifact Registry**.
+The entire application is containerized. The base image is `nvidia/cuda:12.2.0-runtime-ubuntu22.04` to support GPU inference. The image is stored in **Google Artifact Registry** (`me-west1-docker.pkg.dev`).
 
-### ☁️ Google Compute Engine (GCE)
-The cloud VM that runs the SafeVision Docker container. A GCE VM was chosen over serverless options (Cloud Run, Lambda) because:
-- RTSP streaming requires a **persistent, long-lived process** — serverless functions time out.
-- The VM has a **stable public IP** that the mobile app can always connect to.
+### ☁️ Google Compute Engine (GCE) — me-west1-b (Tel Aviv)
+The cloud VM that runs the SafeVision Docker container. A GPU VM in **Tel Aviv** (`me-west1-b`) was chosen to minimize latency to the camera and end users. The VM uses an **NVIDIA Tesla T4** for GPU inference.
 
 ### 🔄 GitHub Actions — CI/CD
 On every push to `main`, the pipeline automatically:
-1. Builds a new Docker image.
-2. Pushes it to Google Artifact Registry.
-3. SSHs into the GCE VM and hot-swaps the container with zero downtime.
+1. Checks out code **including Git LFS model files**.
+2. Builds a new Docker image.
+3. Pushes it to Google Artifact Registry.
+4. SSHs into the GCE VM and hot-swaps the container with zero downtime.
 
-Authentication uses **Workload Identity Federation** (keyless auth) — no long-lived JSON service account keys are stored as secrets.
+Authentication uses **Workload Identity Federation** (keyless auth — no long-lived JSON keys stored as secrets).
 
 ### 🔒 Tailscale — Secure Camera VPN
-The IP camera sits on a private home network (`192.168.1.9`). The GCE VM is on Google Cloud. To connect them securely without opening ports on the router, we use **Tailscale** — a zero-config VPN built on WireGuard. The local Windows PC acts as a **subnet router**, advertising `192.168.1.0/24` to the Tailscale network so the GCE VM can reach the camera directly over an encrypted tunnel.
+The IP camera sits on a private home network. The GCE VM is on Google Cloud. Tailscale (WireGuard-based zero-config VPN) connects them securely. The local Windows PC acts as a **subnet router**, advertising `192.168.1.0/24` to the Tailscale mesh so the GCE VM can reach the camera directly.
 
 ---
 
@@ -107,21 +121,24 @@ SafeVision/
 ├── app/
 │   ├── __init__.py          # Package marker
 │   ├── config.py            # Centralized config (env vars + dotenv)
-│   ├── database.py          # MongoDB Atlas connection
-│   ├── models_loader.py     # Lazy YOLO + ArcFace loading
-│   ├── enhancement.py       # Low-light image enhancement (CLAHE)
-│   ├── recognition.py       # Face recognition (vector search)
-│   ├── stream.py            # Threaded RTSP video reader
-│   ├── processor.py         # Frame processing pipeline
-│   ├── api.py               # FastAPI server (MJPEG + REST)
-│   └── main.py              # Entry point
+│   ├── database.py          # MongoDB Atlas connection (sync + async)
+│   ├── models_loader.py     # Lazy YOLO + ArcFace ONNX loading (thread-safe singletons)
+│   ├── enhancement.py       # Low-light image enhancement (CLAHE + gamma + denoising)
+│   ├── recognition.py       # Face recognition (MongoDB vector search + adaptive thresholds)
+│   ├── tracker.py           # ByteTrack-style IoU multi-object tracker
+│   ├── stream.py            # Threaded RTSP video reader (always-latest frame)
+│   ├── processor.py         # 2-stage frame processor (detect → recognize_faces)
+│   ├── alerts.py            # Firebase Cloud Messaging push alerts
+│   ├── api.py               # FastAPI server — 3-thread pipeline + MJPEG + REST
+│   └── main.py              # Entry point (TensorRT engine build + uvicorn)
 ├── models/
 │   ├── best.pt              # YOLO face detector weights (Git LFS)
 │   └── w600k_r50.onnx       # ArcFace embedding model (Git LFS)
 ├── scripts/
-│   └── deploy.sh            # Manual GCE deployment script
+│   ├── enroll_face.py       # CLI to enroll face photos into MongoDB
+│   └── export_tensorrt.py   # Export YOLO to TensorRT .engine format
 ├── .github/workflows/
-│   └── deploy.yml           # CI/CD pipeline
+│   └── deploy.yml           # CI/CD pipeline (build → push → deploy)
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .env.example             # Environment variable template
@@ -135,7 +152,7 @@ SafeVision/
 
 ### Prerequisites
 
-- **Python 3.10**
+- **Python 3.11**
 - **MongoDB Atlas** cluster with a vector search index named `vector_index` on the `faces` collection
 - **RTSP camera** accessible via network (local or Tailscale VPN)
 - **Git LFS** installed (for model files)
@@ -145,7 +162,7 @@ SafeVision/
 ```bash
 git clone https://github.com/AbdallahSharf/SafeVision.git
 cd SafeVision
-git lfs pull  # Download model weights
+git lfs pull  # Download model weights (~175 MB)
 ```
 
 ### 2. Set up environment
@@ -170,7 +187,7 @@ cp .env.example .env
 python -m app.main
 ```
 
-The server starts at `http://localhost:8080`. Open `http://localhost:8080/stream` in a browser to see the live annotated feed.
+The server starts at `http://localhost:8080`. Open `http://localhost:8080/stream` in a browser to see the live annotated MJPEG feed.
 
 ---
 
@@ -182,39 +199,47 @@ The server starts at `http://localhost:8080`. Open `http://localhost:8080/stream
 docker-compose up --build
 ```
 
-### Or manually
+### GPU deployment (recommended)
 
 ```bash
 docker build -t safevision .
-docker run -d --name safevision -p 8080:8080 --env-file .env safevision
+docker run -d \
+  --name safevision \
+  --restart unless-stopped \
+  --network host \
+  --gpus all \
+  -v /opt/safevision/unauthorized_faces:/opt/safevision/unauthorized_faces \
+  --env-file /opt/safevision/.env \
+  safevision
 ```
 
 ---
 
 ## 📡 API Reference
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | API info and available endpoints |
-| `/health` | GET | Health check (200 if healthy, 503 if degraded) |
-| `/status` | GET | System metrics: FPS, stream state, DB face count |
-| `/stream` | GET | Live MJPEG video stream with face recognition overlays |
-| `/faces` | GET | Recently recognized faces (JSON) |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/` | GET | — | API info and available endpoints |
+| `/health` | GET | — | Health check (200 healthy / 503 degraded) |
+| `/status` | GET | — | System metrics: FPS, pipeline state, DB face count |
+| `/stream` | GET | — | Live MJPEG video stream with face recognition overlays |
+| `/faces` | GET | Bearer | Recently recognized faces (JSON) |
+| `/alerts` | GET | Bearer | Recent unauthorized access alerts |
+| `/images/{filename}` | GET | — | Saved unauthorized face images |
+| `/admin/reload-thresholds` | POST | Bearer | Recompute per-identity recognition thresholds |
 
-### `/stream` — Live Video
+### `/stream` — Live MJPEG Video
 
-Open in a browser or use in your mobile app:
+Open in a browser or mobile app:
 
 ```
 http://<server-ip>:8080/stream
 ```
 
-This returns a continuous MJPEG stream. In mobile apps, load it in an image/video view component.
-
 ### `/faces` — Recent Detections
 
 ```bash
-curl http://localhost:8080/faces?limit=5
+curl -H "Authorization: Bearer <token>" http://localhost:8080/faces?limit=5
 ```
 
 ```json
@@ -239,11 +264,17 @@ curl http://localhost:8080/status
 ```json
 {
   "stream_connected": true,
-  "fps": 14.2,
-  "faces_in_db": 150,
+  "pipeline": {
+    "reader": "running",
+    "detector": "running",
+    "recognizer": "running"
+  },
+  "fps": 15.2,
+  "faces_in_db": 12,
   "uptime_seconds": 3600.5,
   "config": {
-    "frame_size": "800x600",
+    "frame_size": "1280x720",
+    "jpeg_quality": 65,
     "yolo_conf": 0.4,
     "recog_threshold": 0.6,
     "low_light_enabled": true
@@ -255,16 +286,19 @@ curl http://localhost:8080/status
 
 ## ☁️ Google Compute Engine Deployment
 
-### 1. Create a GCE VM
+### 1. Create a GPU VM in Tel Aviv
 
 ```bash
-gcloud compute instances create safevision-vm \
-    --zone=me-west1-a \
-    --machine-type=e2-standard-4 \
+gcloud compute instances create safevision-gpu-vm \
+    --zone=me-west1-b \
+    --machine-type=n1-standard-4 \
+    --accelerator=type=nvidia-tesla-t4,count=1 \
+    --maintenance-policy=TERMINATE \
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
     --boot-disk-size=50GB \
-    --tags=http-server
+    --tags=safevision-server \
+    --metadata=install-nvidia-driver=True
 ```
 
 ### 2. Allow HTTP traffic on port 8080
@@ -272,20 +306,18 @@ gcloud compute instances create safevision-vm \
 ```bash
 gcloud compute firewall-rules create allow-safevision \
     --allow=tcp:8080 \
-    --target-tags=http-server \
+    --target-tags=safevision-server \
     --description="Allow SafeVision API access"
 ```
 
 ### 3. Create the `.env` file on the VM
 
 ```bash
-# SSH into the VM
-gcloud compute ssh safevision-vm --zone=me-west1-a
+gcloud compute ssh safevision-gpu-vm --zone=me-west1-b
 
-# Create env file directory
-sudo mkdir -p /opt/safevision
+sudo mkdir -p /opt/safevision/unauthorized_faces
 sudo nano /opt/safevision/.env
-# Paste your MONGO_URI and RTSP_URL, then save
+# Paste your env vars, then save
 ```
 
 ### 4. Set up Tailscale VPN (for local camera access)
@@ -295,6 +327,8 @@ See the [Tailscale Setup](#-tailscale-vpn-setup) section below.
 ### 5. Deploy via GitHub Actions
 
 Push to `main` — the CI/CD pipeline handles everything else automatically.
+
+> **Note:** Make sure your `GCE_VM_ZONE` GitHub secret is set to `me-west1-b`.
 
 ### 6. Access the stream
 
@@ -306,7 +340,7 @@ http://<VM-EXTERNAL-IP>:8080/stream
 
 ## 🔄 CI/CD (GitHub Actions)
 
-Auto-deploys to GCE on every push to `main` using **Workload Identity Federation** (no JSON keys required).
+Auto-builds and pushes on every commit to `main`. Uses **Workload Identity Federation** (no JSON keys required).
 
 ### Required GitHub Secrets
 
@@ -315,11 +349,13 @@ Auto-deploys to GCE on every push to `main` using **Workload Identity Federation
 | `GCP_PROJECT_ID` | Google Cloud project ID (e.g. `safevision-00`) |
 | `GCP_WIF_PROVIDER` | Workload Identity Provider resource name |
 | `GCP_SA_EMAIL` | Service account email |
-| `GCE_VM_NAME` | Compute Engine VM name (e.g. `safevision-vm`) |
-| `GCE_VM_ZONE` | VM zone (e.g. `me-west1-a`) |
+| `GCE_VM_NAME` | Compute Engine VM name (e.g. `safevision-gpu-vm`) |
+| `GCE_VM_ZONE` | VM zone — must be `me-west1-b` |
 | `GCE_SSH_PRIVATE_KEY` | Private SSH key for connecting to the VM |
 
-> **Note:** The `.env` file (containing `MONGO_URI` and `RTSP_URL`) lives directly on the VM at `/opt/safevision/.env` and is **not** stored in GitHub secrets. The deployment pipeline mounts it into the container at runtime.
+> **Note:** The `.env` file (containing `MONGO_URI`, `RTSP_URL`, etc.) lives directly on the VM at `/opt/safevision/.env` and is **not** stored in GitHub. The deployment pipeline mounts it into the container at runtime.
+
+> **Important:** Model files (`best.pt`, `w600k_r50.onnx`) are stored in Git LFS. The CI/CD workflow uses `actions/checkout@v4` with `lfs: true` to ensure the real model weights (not LFS pointer files) are included in the Docker image.
 
 ---
 
@@ -341,141 +377,131 @@ tailscale up --advertise-routes=192.168.1.0/24
 
 Then go to the [Tailscale Admin Console](https://login.tailscale.com/admin/machines), find your PC, click **Edit route settings**, and approve the advertised route.
 
-### 3. Install Tailscale on the VM and link it
+### 3. Install Tailscale on the VM
 
 ```bash
-# Install
-ssh user@<VM-IP> "curl -fsSL https://tailscale.com/install.sh | sh"
-
-# Start and get the auth link
-ssh user@<VM-IP> "sudo tailscale up"
-# → Opens a URL — open it and log in with the SAME account as Step 1
-
-# Tell the VM to use routes from the PC
-ssh user@<VM-IP> "sudo tailscale up --accept-routes"
+gcloud compute ssh safevision-gpu-vm --zone=me-west1-b --command="curl -fsSL https://tailscale.com/install.sh | sudo sh && sudo tailscale up --accept-routes"
 ```
+
+Open the auth URL it prints and log in with the **same account** as Step 1.
 
 ### 4. Update RTSP URL
 
-Once connected, update your VM's `/opt/safevision/.env` to use the camera's local IP:
+Once connected, set your VM's `/opt/safevision/.env`:
 
 ```env
-RTSP_URL=rtsp://admin:your_password@192.168.1.9:554/cam/realmonitor?channel=1&subtype=0
+RTSP_URL=rtsp://admin:your_password@192.168.1.x:554/cam/realmonitor?channel=1&subtype=0
 ```
-
-Restart the container:
-```bash
-docker restart safevision
-```
-
----
-
-## 🐛 Deployment Challenges & How We Solved Them
-
-This section documents the real problems encountered during deployment and the solutions applied — useful for anyone setting up a similar system.
-
-### ❌ Problem 1: Docker container pulled but the app crashed silently
-**What happened:** The GitHub Actions workflow reported ✅ success even though the container wasn't actually running. The deployment script lacked `set -e`, so even when `docker pull` failed silently, the script continued to the final "success" echo.
-
-**Fix:** Added `set -e` to the SSH deployment script so any failing command immediately aborts the pipeline with a red failure status.
-
----
-
-### ❌ Problem 2: Server crashed at startup when camera was offline
-**What happened:** `stream.py` raised a `RuntimeError` in `__init__` if OpenCV couldn't open the RTSP stream. This caused FastAPI's startup lifecycle to fail, taking down the entire server.
-
-**Fix:** Changed the hard `raise RuntimeError(...)` to a `logger.warning(...)`. The server now starts successfully even if the camera is temporarily offline, and the background thread keeps retrying the connection automatically.
-
----
-
-### ❌ Problem 3: `/stream` endpoint showed a black screen (infinite loading)
-**What happened:** Because the camera was offline, no frames were ever placed into the MJPEG queue. The browser waited forever for the first multipart boundary to arrive, displaying a frozen blank page.
-
-**Fix:** Added a generated placeholder frame ("Camera Connecting or Offline" on a black background) that is yielded by the MJPEG generator whenever the frame queue is empty, so the browser always gets an immediate response.
-
----
-
-### ❌ Problem 4: Cloudflare Tunnels don't support RTSP
-**What happened:** The initial approach used a Cloudflare Quick Tunnel (`trycloudflare.com`) to expose the camera. Cloudflare Tunnels only proxy HTTP/HTTPS traffic — raw TCP streams like RTSP are blocked at the protocol level, causing a 30-second timeout in OpenCV every attempt.
-
-**Fix:** Switched to **Tailscale** as the camera tunnel. Tailscale uses WireGuard (Layer 3 VPN), which carries raw TCP at the network level and has no restrictions on protocols. The local Windows PC acts as a subnet router, and the GCE VM connects to the camera's local IP (`192.168.1.9`) through the encrypted tunnel.
-
----
-
-### ❌ Problem 5: RTSP stream connected but no frames arrived (UDP packet loss)
-**What happened:** Even after Tailscale connected the VM to the camera's local IP, OpenCV defaulted to UDP transport for RTSP. UDP packets are frequently dropped over VPN tunnels due to MTU fragmentation and encapsulation overhead, causing the stream thread to time out on every read attempt.
-
-**Fix:** Added `os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"` in `stream.py` before importing `cv2`. This forces FFMPEG to use TCP as the RTSP transport layer, which is reliable over VPN tunnels and eliminates packet loss.
-
----
-
-### ❌ Problem 6: VM couldn't pull the Docker image (IAM permission error)
-**What happened:** The GCE VM's default Compute Engine service account was missing the `Artifact Registry Reader` role, so `docker pull` failed with a 403 Unauthorized error. The original deployment script used `gcloud auth configure-docker` inside the VM, but the VM's service account lacked the necessary scope.
-
-**Fix:** Granted the `artifactregistry.repositories.downloadArtifacts` permission to the Compute Engine service account via Google Cloud IAM. Then restructured the deployment to pass an access token from the GitHub Actions runner (which already has the correct credentials) to the VM via the SSH session for the `docker login` step.
 
 ---
 
 ## ⚙️ Environment Variables
 
-See [`.env.example`](.env.example) for all available variables with descriptions.
+See [`.env.example`](.env.example) for all variables with descriptions.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `MONGO_URI` | ✅ | — | MongoDB Atlas connection string |
 | `RTSP_URL` | ✅ | — | RTSP camera URL |
 | `PORT` | ❌ | `8080` | API server port |
-| `DISPLAY_OUTPUT` | ❌ | `false` | Enable OpenCV GUI window |
+| `YOLO_MODEL_PATH` | ❌ | `models/best.pt` | Path to YOLO weights |
+| `ARCFACE_MODEL_PATH` | ❌ | `models/w600k_r50.onnx` | Path to ArcFace ONNX model |
 | `YOLO_CONF_THRESHOLD` | ❌ | `0.4` | YOLO detection confidence threshold |
 | `BOX_CONF_THRESHOLD` | ❌ | `0.6` | Bounding box confidence filter |
 | `RECOG_THRESHOLD` | ❌ | `0.6` | Face recognition match threshold |
+| `BLUR_THRESHOLD` | ❌ | `80.0` | Laplacian variance below which face crops are skipped |
 | `LOW_LIGHT_ENABLE` | ❌ | `true` | Auto low-light enhancement (CLAHE) |
-| `HISTORY_LEN` | ❌ | `5` | Frames used for temporal identity smoothing |
-| `FRAME_WIDTH` | ❌ | `800` | Processing resolution width |
-| `FRAME_HEIGHT` | ❌ | `600` | Processing resolution height |
+| `FRAME_WIDTH` | ❌ | `1280` | Processing resolution width |
+| `FRAME_HEIGHT` | ❌ | `720` | Processing resolution height |
+| `STREAM_JPEG_QUALITY` | ❌ | `65` | MJPEG stream JPEG quality (0–100) |
+| `FACE_SIZE` | ❌ | `112` | ArcFace input face crop size (px) |
+| `FACE_MARGIN` | ❌ | `20` | Bounding box expansion margin (px) |
+| `API_SECRET_KEY` | ❌ | — | Bearer token for protected endpoints |
+| `FIREBASE_CREDENTIALS` | ❌ | — | Path to Firebase service account JSON |
 
 ---
 
-## 🚀 Recent Improvements (v2.0)
+## 🚀 What We Built — Full Development History
 
-We recently shipped a major update to the SafeVision pipeline to dramatically improve performance, accuracy, and reliability:
+### v1.0 — Foundation
+- FastAPI server with MJPEG `/stream` endpoint
+- YOLO face detection + InsightFace ArcFace recognition
+- MongoDB Atlas vector search for identity lookup
+- Basic Tailscale VPN setup for camera connectivity
+- Dockerized deployment to GCE
 
-### ⚡ Performance Architecture
-- **Async 3-Stage Pipeline**: Decoupled the RTSP reader, YOLO detector, and ArcFace recognizer into separate concurrent threads connected by bounded queues. This pipelining roughly doubles throughput on multi-core CPUs.
-- **IoU-based Object Tracking (SORT-lite)**: Replaced grid-based spatial smoothing with a proper multi-object tracker. Each face gets a persistent integer ID across frames, eliminating "identity flicker" and correctly handling people crossing paths.
-- **Frame Skipping for Detection & Recognition**: YOLO detection and ArcFace recognition only run every N frames (e.g., every 3rd frame), reusing cached bounding boxes and identities in between. This drastically cuts CPU/GPU and MongoDB Vector Search load while keeping the stream perfectly smooth, eliminating frame drops.
-- **JPEG Quality Tuning**: MJPEG stream quality tuned from 80 to 65, reducing per-frame bandwidth by ~35% for a much smoother stream over the Tailscale VPN.
+### v1.5 — Stability & Reliability
+- Fixed server crash when camera was offline (replaced hard `RuntimeError` with graceful retry)
+- Added "Camera Connecting or Offline" placeholder frame so browser never hangs
+- Forced RTSP TCP transport to eliminate UDP packet loss over Tailscale VPN
+- Added `set -e` to deployment script to surface silent failures
+- Added `/health` endpoint for load balancer probes
 
-### 🎯 Accuracy & Reliability
-- **Multi-angle Enrollment CLI**: Added `scripts/enroll_face.py`, allowing bulk enrollment of multiple photos per identity to improve recognition accuracy for non-frontal faces.
-- **Adaptive Recognition Thresholds**: Instead of a fixed global threshold, the system now computes a per-identity calibrated threshold based on the variance of their enrolled embeddings (tighter gates for consistent faces, looser gates for varied faces).
-- **Blur Quality Gate**: Computes a Laplacian variance score on face crops before recognition. Blurry/motion-blurred faces are skipped, preventing low-quality embeddings from polluting the temporal smoothing history.
-- **Persistent Tailscale**: Added a pre-auth key to the GitHub Actions deployment script so the VPN reconnects automatically after a VM reboot.
+### v2.0 — Performance Architecture Overhaul
+- **3-thread pipeline**: Split the monolithic processing loop into three concurrent threads (Reader → YOLO Detector → ArcFace Recognizer) connected by bounded `queue.Queue(maxsize=2)`. Frames are never accumulated — stale frames are dropped to keep latency minimal.
+- **Decoupled MJPEG generator**: The video stream now runs completely independently of the AI pipeline. It pulls the freshest raw camera frame and overlays the *latest known* AI bounding boxes. This guarantees smooth video at camera FPS even when AI inference is slower.
+- **IoU-based ByteTrack-style tracker**: Replaced grid-based smoothing with a proper multi-object tracker (`tracker.py`). Each face gets a persistent integer ID, enabling correct handling of multiple people and eliminating identity flicker.
+- **Adaptive recognition thresholds**: Per-identity calibrated thresholds based on the standard deviation of enrolled embeddings. Consistent enrollees get tight thresholds; varied enrollees get looser ones.
+- **Blur quality gate**: Laplacian variance computed on face crops every 5 frames (cached). Blurry crops are skipped entirely.
+- **Batch ArcFace inference**: Up to 4 face crops batched into a single ONNX Runtime call for proportional throughput improvement on GPU.
+- **Async DB background thread**: MongoDB vector search runs in a dedicated asyncio event loop thread so it never blocks YOLO or the MJPEG generator.
+- **Multi-angle face enrollment**: Added `scripts/enroll_face.py` for bulk enrollment of multiple photos per identity.
 
-### 🔐 Security & Infrastructure
-- **API Authentication**: Added HTTP Bearer Token checks (via FastAPI's `Depends`) to secure the `/stream`, `/faces`, and `/admin` endpoints.
-- **Real-time Push Alerts**: Added Firebase Cloud Messaging (FCM) integration. A webhook fires the exact millisecond an "Unauthorized" face is detected, sending a push notification and confidence score directly to the mobile app.
-- **GPU Deployment**: Migrated the deployment to a Google Cloud `europe-west4-a` Spot VM equipped with an NVIDIA Tesla T4 GPU. Updated the `Dockerfile` and CI/CD script to utilize the GPU via `--gpus all`.
+### v2.5 — Security & Alerts
+- **API authentication**: HTTP Bearer Token checks (FastAPI `Depends`) on `/faces`, `/alerts`, and `/admin` endpoints.
+- **Firebase push alerts**: Real-time FCM push notification fires on first unauthorized face detection, including confidence score and saved face image.
+- **Unauthorized face logging**: Saves a cropped JPEG of every unauthorized face to `/opt/safevision/unauthorized_faces/` and serves it via `/images/` static endpoint.
+- **`/alerts` endpoint**: Mobile app can query the full alert history from MongoDB.
+- **`/admin/reload-thresholds`**: Hot-reload calibrated thresholds after enrolling new faces — no restart required.
+
+### v3.0 — GPU Migration & MJPEG Optimization
+- **Migrated to NVIDIA Tesla T4 GPU** on Google Cloud `me-west1-b` (Tel Aviv zone) for lower latency.
+- **Removed WebRTC entirely**: Stripped `aiortc` and all WebRTC code. Pure MJPEG `/stream` is the single video endpoint — simpler, faster, and universally compatible.
+- **Removed `aiortc` and `insightface`**: ArcFace now loaded directly via ONNX Runtime — no Cython compilation required. Eliminates fragile C++ build dependencies from the Docker image.
+- **Removed `DETECT_EVERY_N` frame-skipping**: YOLO now runs on every single frame for maximum tracking accuracy, enabled by GPU speed.
+- **ONNX Runtime graph optimizations**: `ORT_ENABLE_ALL` graph optimization enabled for ArcFace session (constant folding, node fusion, layout optimization).
+- **Git LFS fix in CI/CD**: Added `lfs: true` to `actions/checkout@v4` so model weights are included in Docker builds (previously only LFS pointer files were copied, causing `UnpicklingError` at startup).
+- **Direct VM model injection**: Models can be hot-injected into a running container (`docker cp`) without rebuilding the image.
 
 ---
 
-## 🔮 Future Roadmap & Cost-Saving Tips
+## 🐛 Deployment Challenges & How We Solved Them
 
-### 💰 Cost-Saving Tips for Google Cloud
-If you are running this as a personal or home project, you can drastically reduce your Google Cloud bill:
-1. **Use Spot Instances (-70% cost):** Change your VM Provisioning Model to "Spot". Google will run your VM on excess capacity at a huge discount. Because SafeVision uses Docker with `--restart unless-stopped`, if Google restarts your VM, the camera stream will automatically come back online.
-2. **Release your Static IP:** You are paying ~$3/mo for a static IP. Because the VM is connected to Tailscale, you can connect to the Tailscale `100.x.x.x` IP for free and release the public static IP.
-3. **Downgrade to Standard HDD:** You are currently using a 50GB SSD (~$8.50/mo). Since the AI models load directly into RAM on startup, you can recreate the VM using a Standard Persistent Disk to drop this cost to ~$2.00/mo without losing stream performance.
+### ❌ Docker container pulled but app crashed silently
+**Cause:** Deployment script lacked `set -e` — `docker pull` failed silently and the script continued.  
+**Fix:** Added `set -e` so any failing command immediately aborts the pipeline.
 
-### 🎯 Further Recommendations for Performance & Accuracy
-**Performance:**
-1. **Asynchronous Database Queries** — Move the MongoDB `$vectorSearch` into an asynchronous background task so it never blocks the main video rendering thread, completely decoupling recognition from video FPS.
-2. **TensorRT Optimization** — Compile the YOLO and ArcFace ONNX models into NVIDIA TensorRT engines. This can double the inference speed on the T4 GPU compared to standard PyTorch.
-3. **WebRTC instead of MJPEG** — Migrate the stream endpoint to WebRTC (`aiortc`) for adaptive bitrate, sub-200ms latency, and better browser support over Tailscale.
+### ❌ Server crashed at startup when camera was offline
+**Cause:** `stream.py` raised `RuntimeError` in `__init__` if OpenCV couldn't open RTSP.  
+**Fix:** Changed hard raise to `logger.warning`. Server starts even if camera is temporarily offline.
 
-**Accuracy:**
-1. **Fine-Tune ArcFace** — Fine-tune the ArcFace model on low-angle, low-light security camera footage (currently it is trained on high-quality frontal faces like WebFace600k).
-2. **Specialized Dense Face Detector** — Replace the standard YOLO detector with RetinaFace or YOLOv11-Face to detect 5 facial landmarks (eyes, nose, mouth corners), enabling precise geometric alignment before ArcFace embedding.
+### ❌ MJPEG stream showed black screen
+**Cause:** No frames ever placed into the queue when camera was offline — browser waited forever.  
+**Fix:** Added a generated "Camera Connecting or Offline" placeholder frame yielded when queue is empty.
+
+### ❌ Cloudflare Tunnels blocked RTSP
+**Cause:** Cloudflare Tunnels only proxy HTTP/HTTPS — raw TCP RTSP is blocked.  
+**Fix:** Switched to Tailscale (WireGuard Layer 3 VPN) — carries raw TCP with no protocol restrictions.
+
+### ❌ RTSP connected but no frames (UDP packet loss over VPN)
+**Cause:** OpenCV defaulted to UDP RTSP transport. UDP packets drop over VPN due to MTU fragmentation.  
+**Fix:** Set `OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp` to force reliable TCP transport.
+
+### ❌ VM couldn't pull Docker image (IAM 403)
+**Cause:** Compute Engine service account was missing `Artifact Registry Reader` role.  
+**Fix:** Granted `artifactregistry.repositories.downloadArtifacts` permission to the service account.
+
+### ❌ Models loaded as LFS pointer files (UnpicklingError at startup)
+**Cause:** `actions/checkout@v4` without `lfs: true` downloads 132-byte pointer text files instead of real model weights. PyTorch tries to unpickle the pointer file and crashes.  
+**Fix:** Added `lfs: true` to the checkout action in `.github/workflows/deploy.yml`.
+
+### ❌ GitHub Action failed on VM SSH (wrong zone secret)
+**Cause:** `GCE_VM_ZONE` GitHub secret was still set to the old US zone (`us-central1-a`) after migrating the VM to Tel Aviv (`me-west1-b`).  
+**Fix:** Update the `GCE_VM_ZONE` secret to `me-west1-b` in GitHub Repository Settings → Secrets.
+
+### ❌ Docker authentication failed during manual deployment
+**Cause:** VM's Docker daemon wasn't authenticated to the Artifact Registry.  
+**Fix:** Run `gcloud auth configure-docker me-west1-docker.pkg.dev` on the VM before `docker pull`.
 
 ---
 
@@ -483,13 +509,15 @@ If you are running this as a personal or home project, you can drastically reduc
 
 | Problem | Solution |
 |---------|----------|
-| Stream shows "Camera Connecting or Offline" | Check Tailscale is running on your PC (`tailscale status`); verify the camera local IP is correct |
-| `Frame queue timed out` in logs | The RTSP stream is dropping packets — ensure TCP transport is forced (`OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp` in `.env`) |
-| `Cannot connect to MongoDB` | Verify `MONGO_URI`; check Atlas Network Access allows the VM's IP or `0.0.0.0/0` for development |
-| Models load slowly on first start | First run loads ~170 MB of weights into RAM — subsequent starts are faster due to OS file caching |
-| Very low FPS (< 5) | Lower `FRAME_WIDTH`/`FRAME_HEIGHT`; set `DENOISE_STRENGTH=0`; consider upgrading to a GPU VM |
-| `cv2.imshow` crash on server | Ensure `DISPLAY_OUTPUT=false` (default in Docker) |
-| Tailscale VPN disconnects after reboot | Re-run `sudo tailscale up --accept-routes` on the VM, or set up a systemd service with a pre-auth key |
+| Stream shows "Camera Connecting or Offline" | Check Tailscale is running (`tailscale status`); verify RTSP URL and camera IP |
+| `AI FPS: 0.0` on stream | Model file is corrupt — check container logs for `UnpicklingError`; re-run `docker cp` with real model files |
+| `/status` returns 500 | Check container logs for Python errors |
+| `Frame queue timed out` in logs | RTSP dropping packets — ensure `OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp` is set |
+| `Cannot connect to MongoDB` | Verify `MONGO_URI`; check Atlas Network Access allows the VM IP |
+| Models load slowly on first start | First run loads ~175 MB into GPU memory — normal |
+| Very low FPS (< 5) | Lower `FRAME_WIDTH`/`FRAME_HEIGHT`; verify GPU is accessible (`--gpus all` in docker run) |
+| Tailscale VPN disconnects after reboot | Re-run `sudo tailscale up --accept-routes` on the VM |
+| `git lfs pull` fails | Check GitHub LFS bandwidth quota — if exceeded, copy models manually via `gcloud compute scp` |
 
 ---
 
