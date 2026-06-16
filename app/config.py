@@ -111,6 +111,17 @@ class Settings:
     CLAHE_TILE_SIZE:          int   = int(os.environ.get("CLAHE_TILE_SIZE",     "8"))
     DENOISE_STRENGTH:         int   = int(os.environ.get("DENOISE_STRENGTH",    "0"))
 
+    # ── GPU stream decode ─────────────────────────────────────────────────
+    USE_GPU_DECODE: bool = os.environ.get("USE_GPU_DECODE", "true").lower() == "true"
+
+    # ── FAISS local index ─────────────────────────────────────────────────
+    # Interval (seconds) between periodic syncs of the FAISS index with MongoDB
+    FAISS_SYNC_INTERVAL: int = int(os.environ.get("FAISS_SYNC_INTERVAL", "60"))
+
+    # ── Alert rate limiting ───────────────────────────────────────────────
+    # Minimum seconds between consecutive FCM alerts
+    ALERT_COOLDOWN_SECONDS: int = int(os.environ.get("ALERT_COOLDOWN_SECONDS", "60"))
+
 
 # Singleton — import ``settings`` everywhere
 settings = Settings()

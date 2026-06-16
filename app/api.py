@@ -1,13 +1,19 @@
 """
 FastAPI application for SafeVision.
 
-Phase 2 refactor: the single background processing loop is now split into
-three concurrent threads connected by bounded queues:
+Phase 4 refactor: performance optimizations.
+
+  - Event-driven MJPEG streaming (replaces CPU-burning spin-loop)
+  - FAISS local index initialization and periodic sync
+  - All existing endpoints preserved
+
+Pipeline Architecture (3 threads + inference/DB background threads):
 
   Thread 1 — _reader_loop()
       Reads raw frames from the RTSP VideoStream and puts them into
       _rtsp_queue.  Drops the oldest frame when the queue is full so the
       system always works with the freshest available image.
+      Signals _new_frame_event for MJPEG consumers.
 
   Thread 2 — _detector_loop()
       Pops raw frames from _rtsp_queue, runs Stage 1 of FrameProcessor
@@ -18,10 +24,6 @@ three concurrent threads connected by bounded queues:
       Pops (frame, boxes) from _detect_queue, runs Stage 2 of
       FrameProcessor (ArcFace + tracker), and stores the result
       in _latest_ai_results.
-
-The MJPEG generator runs independently, pulling the freshest raw frame
-from Thread 1 and the latest AI results from Thread 3, guaranteeing
-zero-latency video.
 
 Endpoints
 ---------
@@ -49,7 +51,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.database import faces_collection
 from app.stream import VideoStream
 from app.processor import FrameProcessor
-from app.recognition import reload_thresholds
+from app.recognition import reload_thresholds, load_faiss_index, get_faiss_index
 from app.alerts import init_firebase
 
 logger = logging.getLogger("safevision")
@@ -71,6 +73,9 @@ _latest_ai_results: list = []
 _latest_raw_unprocessed: np.ndarray | None = None
 _frame_lock = threading.Lock()
 
+# Event-driven MJPEG — replaces CPU-burning spin-loop
+_new_frame_event = threading.Event()
+
 def get_latest_fast_frame():
     """Return the latest raw camera frame for the low-latency MJPEG fast-path."""
     with _frame_lock:
@@ -80,6 +85,7 @@ def get_latest_fast_frame():
 _reader_thread: threading.Thread | None = None
 _detector_thread: threading.Thread | None = None
 _recognizer_thread: threading.Thread | None = None
+_faiss_sync_thread: threading.Thread | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +99,8 @@ def _reader_loop() -> None:
     VideoStream, discarding any intermediate frames that built up while the
     detector was busy.  Also writes every raw frame directly to
     _latest_raw_unprocessed for the low-latency MJPEG fast-path.
+
+    Signals _new_frame_event to wake up MJPEG consumers without spin-waiting.
     """
     global _latest_raw_unprocessed
     logger.info("Reader thread started.")
@@ -107,6 +115,9 @@ def _reader_loop() -> None:
         # Fast-path: expose raw frame immediately for MJPEG (no pipeline delay)
         with _frame_lock:
             _latest_raw_unprocessed = frame
+
+        # Signal MJPEG generator that a new frame is available
+        _new_frame_event.set()
 
         # Push into YOLO/recognition pipeline (drops oldest if detector is behind)
         try:
@@ -179,13 +190,35 @@ def _recognizer_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# FAISS periodic sync thread
+# ---------------------------------------------------------------------------
+def _faiss_sync_loop() -> None:
+    """
+    Periodically re-sync the local FAISS index with MongoDB to pick up
+    new enrollments made externally (e.g., via enroll_face.py).
+    """
+    interval = settings.FAISS_SYNC_INTERVAL
+    logger.info("FAISS sync thread started (interval=%ds).", interval)
+    while True:
+        time.sleep(interval)
+        try:
+            faiss_index = get_faiss_index()
+            count = faiss_index.rebuild(faces_collection)
+            # Also reload adaptive thresholds since enrollments may have changed
+            reload_thresholds()
+            logger.info("FAISS periodic sync complete — %d embeddings.", count)
+        except Exception as exc:
+            logger.warning("FAISS periodic sync failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Lifespan (startup / shutdown)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the 3-thread pipeline on startup; clean up on shutdown."""
     global _video_stream, _processor, _start_time
-    global _reader_thread, _detector_thread, _recognizer_thread
+    global _reader_thread, _detector_thread, _recognizer_thread, _faiss_sync_thread
 
     _start_time = time.time()
 
@@ -196,6 +229,12 @@ async def lifespan(app: FastAPI):
     # Initialize Firebase for push notifications
     init_firebase()
 
+    # Load FAISS index from MongoDB for instant local matching
+    try:
+        load_faiss_index()
+    except Exception as exc:
+        logger.warning("FAISS index failed to load — will use MongoDB fallback: %s", exc)
+
     # Start all three pipeline threads
     _reader_thread = threading.Thread(target=_reader_loop, daemon=True, name="sv-reader")
     _detector_thread = threading.Thread(target=_detector_loop, daemon=True, name="sv-detector")
@@ -205,7 +244,11 @@ async def lifespan(app: FastAPI):
     _detector_thread.start()
     _recognizer_thread.start()
 
-    logger.info("SafeVision API is ready — 3-thread pipeline active.")
+    # Start FAISS periodic sync thread
+    _faiss_sync_thread = threading.Thread(target=_faiss_sync_loop, daemon=True, name="sv-faiss-sync")
+    _faiss_sync_thread.start()
+
+    logger.info("SafeVision API is ready — 3-thread pipeline active + FAISS index.")
     yield  # ── app is running ──
 
     # Shutdown — VideoStream.stop() signals the reader loop to exit
@@ -221,7 +264,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="SafeVision API",
     description="Real-time face recognition security system",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -257,7 +300,7 @@ async def root():
     """API information."""
     return {
         "name": "SafeVision API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "description": "Real-time face recognition security system",
         "endpoints": {
             "/stream": "Live MJPEG video stream",
@@ -270,7 +313,7 @@ async def root():
 
 def _generate_mjpeg():
     """
-    Low-latency MJPEG generator.
+    Low-latency MJPEG generator — event-driven.
 
     Architecture: Decoupled AI streaming
     ────────────────────────────
@@ -278,23 +321,21 @@ def _generate_mjpeg():
     scales it, draws the latest known bounding boxes on it, and sends it.
     This runs completely asynchronously to the AI pipeline, guaranteeing
     a smooth stream (e.g. 30 FPS) even if the AI is processing at 15 FPS.
+
+    Uses threading.Event instead of a spin-loop to avoid burning CPU.
     """
-    last_frame_id: int | None = None
     while True:
+        # Block efficiently until a new frame is available (or timeout 100ms)
+        _new_frame_event.wait(timeout=0.1)
+        _new_frame_event.clear()
+
         with _frame_lock:
             raw = _latest_raw_unprocessed
             ai_results = list(_latest_ai_results)  # shallow copy for thread safety
             current_fps = _processor.fps if _processor else 0.0
 
         if raw is None:
-            time.sleep(0.01)
             continue
-
-        frame_id = id(raw)
-        if frame_id == last_frame_id:
-            time.sleep(0.004)   # ~4 ms spin — keeps CPU low while waiting for a new frame
-            continue
-        last_frame_id = frame_id
 
         # Resize to match the AI bounding box coordinate space
         serve = cv2.resize(raw, (settings.FRAME_WIDTH, settings.FRAME_HEIGHT))
@@ -369,6 +410,7 @@ async def status():
     reader_alive = _reader_thread is not None and _reader_thread.is_alive()
     detector_alive = _detector_thread is not None and _detector_thread.is_alive()
     recognizer_alive = _recognizer_thread is not None and _recognizer_thread.is_alive()
+    faiss_index = get_faiss_index()
     return {
         "stream_connected": _video_stream is not None and _video_stream.is_alive(),
         "pipeline": {
@@ -378,6 +420,10 @@ async def status():
         },
         "fps": _processor.fps if _processor else 0,
         "faces_in_db": face_count,
+        "faiss_index": {
+            "loaded": faiss_index.is_loaded,
+            "embeddings": faiss_index.total_embeddings,
+        },
         "uptime_seconds": round(time.time() - _start_time, 1),
         "config": {
             "frame_size": f"{settings.FRAME_WIDTH}x{settings.FRAME_HEIGHT}",
@@ -386,6 +432,9 @@ async def status():
             "yolo_conf": settings.YOLO_CONF_THRESHOLD,
             "recog_threshold": settings.RECOG_THRESHOLD,
             "low_light_enabled": settings.LOW_LIGHT_ENABLE,
+            "gpu_decode": settings.USE_GPU_DECODE,
+            "faiss_sync_interval": settings.FAISS_SYNC_INTERVAL,
+            "alert_cooldown": settings.ALERT_COOLDOWN_SECONDS,
         },
     }
 
@@ -419,14 +468,19 @@ async def get_alerts(limit: int = 20):
 async def admin_reload_thresholds():
     """
     Recompute adaptive per-identity recognition thresholds from current
-    enrollment data.
+    enrollment data and rebuild the FAISS index.
 
     Call this after enrolling new faces with ``scripts/enroll_face.py``
     so the live system picks up the updated calibration without a restart.
     """
     try:
         reload_thresholds()
-        return {"status": "ok", "message": "Thresholds reloaded successfully."}
+        count = get_faiss_index().rebuild(faces_collection)
+        return {
+            "status": "ok",
+            "message": "Thresholds reloaded and FAISS index rebuilt.",
+            "faiss_embeddings": count,
+        }
     except Exception as exc:
         logger.error("Failed to reload thresholds: %s", exc)
         return {"status": "error", "message": str(exc)}

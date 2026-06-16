@@ -3,8 +3,13 @@ Push notification alerts via Firebase Cloud Messaging (FCM).
 
 Sends a real-time push notification to the mobile app when an unauthorized
 face is detected by the SafeVision pipeline.
+
+Includes cooldown-based rate limiting to prevent alert spam when an
+unauthorized person remains in frame.
 """
 import logging
+import time
+import threading
 import firebase_admin
 from firebase_admin import credentials, messaging
 
@@ -34,10 +39,19 @@ import numpy as np
 
 from app.database import async_alerts_collection
 
+# ---------------------------------------------------------------------------
+# Rate limiting — prevents alert spam for the same unauthorized person
+# ---------------------------------------------------------------------------
+_alert_cooldown_lock = threading.Lock()
+_last_alert_time: float = 0.0
+
+
 async def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray) -> None:
     """
     Send an FCM notification when an unauthorized face is detected and save the photo to the VM.
-    
+
+    Rate-limited: at most one alert per ALERT_COOLDOWN_SECONDS (default 60s).
+
     Parameters
     ----------
     confidence : float
@@ -47,6 +61,20 @@ async def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.n
     face_img : np.ndarray
         The BGR image crop of the face.
     """
+    global _last_alert_time
+
+    # ── Rate limiting ──────────────────────────────────────────────────
+    cooldown = getattr(settings, 'ALERT_COOLDOWN_SECONDS', 60)
+    now = time.time()
+    with _alert_cooldown_lock:
+        if now - _last_alert_time < cooldown:
+            logger.debug(
+                "Alert suppressed (cooldown): %.0fs since last alert < %ds",
+                now - _last_alert_time, cooldown,
+            )
+            return
+        _last_alert_time = now
+
     # ── Save image to VM storage ───────────────────────────────────────
     filename = ""
     try:

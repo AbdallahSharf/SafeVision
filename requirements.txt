@@ -21,6 +21,12 @@ motor==3.6.0
 tensorrt==10.0.1
 aiohttp>=3.9.5
 
+# Local face index (sub-millisecond matching)
+faiss-cpu>=1.7.4
+
+# Enhanced tracker (Hungarian algorithm)
+scipy>=1.11.0
+
 # Utilities
 python-dotenv==1.0.1
 firebase-admin>=6.5.0

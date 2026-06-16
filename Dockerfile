@@ -1,12 +1,17 @@
 # Use the official, ultra-lightweight Python slim image
 FROM python:3.11-slim
 
-# System dependencies for OpenCV headless, FFmpeg (RTSP), and ONNXRuntime/TensorRT
+# System dependencies for OpenCV headless, FFmpeg (RTSP), GStreamer (GPU decode), and ONNXRuntime/TensorRT
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     ffmpeg \
     libgomp1 \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    libgstreamer1.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/safevision

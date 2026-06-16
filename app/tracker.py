@@ -19,10 +19,21 @@ from dataclasses import dataclass, field
 from typing import List, Tuple
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from app.config import settings
 
 logger = logging.getLogger("safevision")
+
+
+# ---------------------------------------------------------------------------
+# Track state constants
+# ---------------------------------------------------------------------------
+
+class TrackState:
+    TENTATIVE = "tentative"
+    CONFIRMED = "confirmed"
+    LOST = "lost"
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +74,13 @@ class Track:
 
     Uses a simple constant-velocity model: we store the last bbox and a
     velocity (dx, dy) estimated from the previous two positions.
+
+    Track lifecycle:
+      Tentative  →  (3 consecutive matches)  →  Confirmed
+      Confirmed  →  (lost_frames > 0)        →  Lost
+      Lost       →  (re-matched)             →  Confirmed
+      Lost       →  (lost_frames > max)      →  Deleted
+      Tentative  →  (lost_frames > 3)        →  Deleted
     """
 
     track_id: int
@@ -73,6 +91,12 @@ class Track:
     _velocity: np.ndarray = field(default_factory=lambda: np.zeros(4))
     _prev_bbox: np.ndarray | None = None
     created_at: float = field(default_factory=time.time)
+    state: str = TrackState.TENTATIVE
+    consecutive_matches: int = 0
+    cached_embedding: np.ndarray | None = None
+
+    # ── Tentative → Confirmed promotion threshold ─────────────────────────
+    _CONFIRM_HITS: int = 3
 
     def update(self, bbox: np.ndarray) -> None:
         """Accept a matched detection, update position and velocity."""
@@ -82,11 +106,24 @@ class Track:
         self._prev_bbox = self.bbox.copy()
         self.bbox = new_bbox
         self.lost_frames = 0
+        self.consecutive_matches += 1
+
+        # State transitions on successful match
+        if self.state == TrackState.TENTATIVE:
+            if self.consecutive_matches >= self._CONFIRM_HITS:
+                self.state = TrackState.CONFIRMED
+        elif self.state == TrackState.LOST:
+            self.state = TrackState.CONFIRMED
 
     def predict(self) -> None:
         """Advance position by velocity (called when no match found)."""
         self.bbox = self.bbox + self._velocity * 0.5   # dampen velocity
         self.lost_frames += 1
+        self.consecutive_matches = 0
+
+        # Confirmed → Lost when the track misses a frame
+        if self.state == TrackState.CONFIRMED:
+            self.state = TrackState.LOST
 
     def predicted_bbox(self) -> np.ndarray:
         """Return expected next position."""
@@ -108,6 +145,10 @@ class FaceTracker:
     """
     IoU-based multi-object tracker for face bounding boxes.
 
+    Uses the Hungarian algorithm for optimal IoU assignment, track-state
+    management (tentative / confirmed / lost), and optional appearance-based
+    re-identification via cached ArcFace embeddings.
+
     Usage::
 
         tracker = FaceTracker()
@@ -118,6 +159,9 @@ class FaceTracker:
             for track in tracks:
                 identity = track.smoothed_identity
     """
+
+    # Cosine-similarity threshold for appearance re-ID
+    _REID_COSINE_THRESHOLD: float = 0.5
 
     def __init__(
         self,
@@ -133,7 +177,8 @@ class FaceTracker:
 
     def update(self, detections: List[Tuple[int, int, int, int]]) -> List[Track]:
         """
-        Match *detections* to existing tracks via greedy IoU matching.
+        Match *detections* to existing tracks via Hungarian IoU matching,
+        with appearance-based re-ID fallback for lost tracks.
 
         Parameters
         ----------
@@ -141,15 +186,15 @@ class FaceTracker:
 
         Returns
         -------
-        List of currently active Track objects (lost_frames == 0).
+        List of currently active Track objects (Confirmed or Lost).
         """
         # Predict next position for all existing tracks
         for t in self._tracks:
             t.predict()
 
         if not detections:
-            self._tracks = [t for t in self._tracks if t.lost_frames <= self._max_lost_frames]
-            return [t for t in self._tracks if t.lost_frames == 0]
+            self._prune_tracks()
+            return self._active_tracks()
 
         if not self._tracks:
             # No existing tracks — create one per detection
@@ -159,27 +204,51 @@ class FaceTracker:
                     bbox=np.array(det, dtype=float),
                 ))
                 self._next_id += 1
-            return list(self._tracks)
+            return self._active_tracks()
 
-        # Build IoU cost matrix and do greedy matching
+        # ------------------------------------------------------------------
+        # Stage 1: Hungarian IoU matching
+        # ------------------------------------------------------------------
         iou_mat = _iou_matrix(self._tracks, detections)
+
+        # Build a cost matrix (1 − IoU); mask out pairs below threshold
+        cost = 1.0 - iou_mat
+        cost[iou_mat < self._iou_threshold] = 1e5  # effectively disable
+
+        row_indices, col_indices = linear_sum_assignment(cost)
+
         matched_track_ids: set[int] = set()
         matched_det_ids: set[int] = set()
 
-        # Greedily match highest-IoU pairs
-        flat_order = np.argsort(-iou_mat, axis=None)  # descending IoU
-        for flat_idx in flat_order:
-            ti = flat_idx // len(detections)
-            di = flat_idx % len(detections)
-            if ti in matched_track_ids or di in matched_det_ids:
-                continue
-            if iou_mat[ti, di] < self._iou_threshold:
-                break
-            self._tracks[ti].update(detections[di])
-            matched_track_ids.add(ti)
-            matched_det_ids.add(di)
+        for ti, di in zip(row_indices, col_indices):
+            if iou_mat[ti, di] >= self._iou_threshold:
+                self._tracks[ti].update(detections[di])
+                matched_track_ids.add(ti)
+                matched_det_ids.add(di)
 
-        # Create new tracks for unmatched detections
+        # ------------------------------------------------------------------
+        # Stage 2: Appearance-based re-ID for unmatched Lost tracks
+        # ------------------------------------------------------------------
+        unmatched_track_indices = [
+            i for i in range(len(self._tracks))
+            if i not in matched_track_ids and self._tracks[i].state == TrackState.LOST
+        ]
+        unmatched_det_indices = [
+            j for j in range(len(detections)) if j not in matched_det_ids
+        ]
+
+        if unmatched_track_indices and unmatched_det_indices:
+            self._appearance_match(
+                unmatched_track_indices,
+                unmatched_det_indices,
+                detections,
+                matched_track_ids,
+                matched_det_ids,
+            )
+
+        # ------------------------------------------------------------------
+        # Stage 3: Create new tentative tracks for remaining detections
+        # ------------------------------------------------------------------
         for di, det in enumerate(detections):
             if di not in matched_det_ids:
                 self._tracks.append(Track(
@@ -188,7 +257,95 @@ class FaceTracker:
                 ))
                 self._next_id += 1
 
-        # Remove stale tracks that have been lost too long
-        self._tracks = [t for t in self._tracks if t.lost_frames <= self._max_lost_frames]
+        # Housekeeping
+        self._prune_tracks()
 
-        return [t for t in self._tracks if t.lost_frames == 0]
+        return self._active_tracks()
+
+    # ── Private helpers ────────────────────────────────────────────────────
+
+    def _appearance_match(
+        self,
+        track_indices: list[int],
+        det_indices: list[int],
+        detections: list,
+        matched_track_ids: set[int],
+        matched_det_ids: set[int],
+    ) -> None:
+        """
+        Try to re-associate lost tracks with unmatched detections based on
+        cached ArcFace embedding cosine similarity.
+        """
+        # Collect tracks that actually have a cached embedding
+        candidates = [
+            (ti, self._tracks[ti])
+            for ti in track_indices
+            if self._tracks[ti].cached_embedding is not None
+        ]
+        if not candidates:
+            return
+
+        # Build a similarity matrix (num_candidate_tracks × num_unmatched_dets)
+        # We can only compare if the detection also has an embedding attached,
+        # but at this level we only have bounding boxes.  The embedding is set
+        # externally (e.g. by FrameProcessor) on the Track *after* matching.
+        # So for re-ID we compare cached track embeddings pairwise.
+        # -----------------------------------------------------------------
+        # Because detections arrive as plain bbox tuples and their embeddings
+        # are not yet computed at this stage, we fall back to checking each
+        # *unmatched detection* against each lost track's cached embedding
+        # only when the caller has previously stored embeddings on tracks.
+        # If no embeddings are available at all, this is a no-op.
+        #
+        # When FrameProcessor attaches embeddings to detections (as a list
+        # parallel to the bbox list), callers can use `update_with_embeddings`
+        # or manually set `track.cached_embedding` after each frame.
+        # -----------------------------------------------------------------
+        # For now, we support the re-ID path when a subclass or external
+        # caller attaches `._det_embeddings` on the tracker before calling
+        # update.  This keeps the public API unchanged.
+        det_embeddings = getattr(self, "_det_embeddings", None)
+        if det_embeddings is None:
+            return
+
+        for ti, track in candidates:
+            if ti in matched_track_ids:
+                continue
+            t_emb = track.cached_embedding
+            best_sim = -1.0
+            best_di = -1
+            for di in det_indices:
+                if di in matched_det_ids:
+                    continue
+                d_emb = det_embeddings[di] if di < len(det_embeddings) else None
+                if d_emb is None:
+                    continue
+                # Cosine similarity
+                sim = float(np.dot(t_emb, d_emb) / (
+                    np.linalg.norm(t_emb) * np.linalg.norm(d_emb) + 1e-6
+                ))
+                if sim > best_sim:
+                    best_sim = sim
+                    best_di = di
+            if best_sim >= self._REID_COSINE_THRESHOLD and best_di >= 0:
+                self._tracks[ti].update(detections[best_di])
+                matched_track_ids.add(ti)
+                matched_det_ids.add(best_di)
+
+    def _prune_tracks(self) -> None:
+        """Remove tracks that should be deleted based on their state."""
+        surviving: List[Track] = []
+        for t in self._tracks:
+            if t.state == TrackState.TENTATIVE and t.lost_frames > 3:
+                continue  # delete tentative tracks quickly
+            if t.state == TrackState.LOST and t.lost_frames > self._max_lost_frames:
+                continue  # delete long-lost tracks
+            surviving.append(t)
+        self._tracks = surviving
+
+    def _active_tracks(self) -> List[Track]:
+        """Return only Confirmed and Lost tracks (not Tentative)."""
+        return [
+            t for t in self._tracks
+            if t.state in (TrackState.CONFIRMED, TrackState.LOST)
+        ]

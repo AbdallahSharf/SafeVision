@@ -1,13 +1,15 @@
 """
 Face recognition against MongoDB Atlas vector search.
 
-Phase 3 update: Adaptive per-identity thresholds.
+Phase 4 update: Two-tier recognition with local FAISS cache.
 
-At startup, ``_IDENTITY_THRESHOLDS`` is populated by computing intra-class
-pairwise cosine similarities for every enrolled person.  During live
-recognition, the per-identity threshold is used instead of the global
-``settings.RECOG_THRESHOLD``, giving tighter gates for consistent faces and
-looser gates for faces enrolled under variable conditions.
+Recognition now uses a two-tier approach:
+  1. **FAISS local index** — instant (<0.1 ms) lookup against cached embeddings
+  2. **MongoDB Atlas $vectorSearch** — fallback when FAISS is not loaded
+
+Adaptive per-identity thresholds are preserved: at startup,
+``_IDENTITY_THRESHOLDS`` is populated by computing intra-class pairwise
+cosine similarities for every enrolled person.
 
 Call ``reload_thresholds()`` to recompute after new faces are enrolled
 without restarting the server.
@@ -59,6 +61,12 @@ def get_threshold(name: str) -> float:
         return _IDENTITY_THRESHOLDS.get(name, settings.RECOG_THRESHOLD)
 
 
+def get_all_thresholds() -> Dict[str, float]:
+    """Return a copy of all per-identity thresholds (for FAISS search)."""
+    with _threshold_lock:
+        return dict(_IDENTITY_THRESHOLDS)
+
+
 # Load thresholds once at import time (non-blocking — fails gracefully)
 try:
     reload_thresholds()
@@ -67,14 +75,36 @@ except Exception as exc:
 
 
 # ---------------------------------------------------------------------------
-# Recognition
+# Local FAISS index (loaded once, rebuilt on enrollment changes)
+# ---------------------------------------------------------------------------
+from app.faiss_index import LocalFaceIndex
+
+_faiss_index = LocalFaceIndex()
+
+def get_faiss_index() -> LocalFaceIndex:
+    """Return the singleton FAISS index instance."""
+    return _faiss_index
+
+
+def load_faiss_index() -> int:
+    """Load/rebuild the FAISS index from MongoDB. Returns count of embeddings loaded."""
+    count = _faiss_index.load_from_mongodb(faces_collection)
+    logger.info("FAISS index ready — %d embeddings cached locally", count)
+    return count
+
+
+# ---------------------------------------------------------------------------
+# Recognition — two-tier: FAISS local → MongoDB fallback
 # ---------------------------------------------------------------------------
 def recognize_face(
     embedding: np.ndarray,
     threshold: float | None = None,
 ) -> Tuple[str, float]:
     """
-    Search MongoDB for the closest face embedding.
+    Search for the closest face embedding using two-tier lookup.
+
+    Tier 1: Local FAISS index (sub-millisecond).
+    Tier 2: MongoDB Atlas $vectorSearch (network round-trip fallback).
 
     Parameters
     ----------
@@ -91,6 +121,18 @@ def recognize_face(
         ``name`` is ``'Unauthorized'`` when the best score is below
         the effective threshold.
     """
+    # ── Tier 1: FAISS local index (instant) ──────────────────────────────
+    if _faiss_index.is_loaded:
+        name, score = _faiss_index.search(
+            embedding,
+            threshold=threshold or settings.RECOG_THRESHOLD,
+            per_identity_thresholds=get_all_thresholds() if threshold is None else None,
+            top_k=settings.DB_TOP_K,
+        )
+        if name is not None:
+            return name, score
+
+    # ── Tier 2: MongoDB Atlas $vectorSearch (network fallback) ───────────
     try:
         cursor = faces_collection.aggregate([
             {
@@ -149,8 +191,23 @@ async def async_recognize_face(
     threshold: float | None = None,
 ) -> Tuple[str, float]:
     """
-    Asynchronous version of recognize_face using Motor.
+    Asynchronous version of recognize_face using two-tier lookup.
+
+    Tier 1: Local FAISS index (instant, no await needed).
+    Tier 2: MongoDB Atlas $vectorSearch via Motor (async network fallback).
     """
+    # ── Tier 1: FAISS local index (instant — no I/O) ─────────────────────
+    if _faiss_index.is_loaded:
+        name, score = _faiss_index.search(
+            embedding,
+            threshold=threshold or settings.RECOG_THRESHOLD,
+            per_identity_thresholds=get_all_thresholds() if threshold is None else None,
+            top_k=settings.DB_TOP_K,
+        )
+        if name is not None:
+            return name, score
+
+    # ── Tier 2: MongoDB Atlas $vectorSearch (async network fallback) ─────
     try:
         pipeline = [
             {

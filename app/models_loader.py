@@ -89,25 +89,32 @@ class ArcFaceONNX:
 
     def get_feats(self, faces_rgb: list[np.ndarray]) -> np.ndarray:
         """
-        Compute face embeddings for a batch of faces simultaneously.
-        
+        Compute face embeddings for a batch of faces in a single ONNX call.
+
+        Builds a single (N, 3, 112, 112) tensor and runs one inference call,
+        avoiding the N× kernel-launch overhead of calling get_feat() in a loop.
+
         Parameters
         ----------
         faces_rgb : list of np.ndarray
             List of H×W×3 uint8 RGB images, already resized to (112, 112).
-            
+
         Returns
         -------
         np.ndarray shape (N, 512)
         """
         if not faces_rgb:
             return np.empty((0, 512), dtype=np.float32)
-            
-        feats = []
-        for face_rgb in faces_rgb:
-            feats.append(self.get_feat(face_rgb)[0])
-            
-        return np.stack(feats, axis=0)
+
+        # Build single (N, 3, 112, 112) tensor — one kernel launch for N faces
+        batch = np.stack([
+            ((face.astype(np.float32) - 127.5) / 128.0).transpose(2, 0, 1)
+            for face in faces_rgb
+        ], axis=0)  # (N, 3, 112, 112)
+
+        return self._session.run(
+            [self._output_name], {self._input_name: batch}
+        )[0]  # (N, 512)
 
 
 # ---------------------------------------------------------------------------
