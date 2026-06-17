@@ -95,42 +95,38 @@ jobs:
           echo "vm_ip=${VM_IP}" >> $GITHUB_OUTPUT
           echo "VM IP: ${VM_IP}"
 
-      - name: Deploy to Compute Engine via SSH
+      - name: Deploy to Compute Engine via IAP
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.GCE_SSH_PRIVATE_KEY }}
-          VM_IP: ${{ steps.get-ip.outputs.vm_ip }}
           FULL_IMAGE: "${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
           GCP_REGION: ${{ env.GCP_REGION }}
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          echo "${SSH_PRIVATE_KEY}" > /tmp/gce_key
-          chmod 600 /tmp/gce_key
-          if [ -z "${VM_IP}" ]; then
-            echo "ERROR: VM_IP is empty. Is the VM running?"
-            exit 1
-          fi
-          ssh -o StrictHostKeyChecking=no -i /tmp/gce_key "Abdallah@${VM_IP}" <<EOF
-            set -e
-            gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
-            docker stop safevision 2>/dev/null || true
-            docker rm safevision 2>/dev/null || true
-            docker system prune -af
-            docker pull "${FULL_IMAGE}"
-            sudo mkdir -p /opt/safevision/unauthorized_faces
-            sudo chmod 777 /opt/safevision/unauthorized_faces
-            docker run -d \
-              --name safevision \
-              --restart unless-stopped \
-              --network host \
-              --gpus all \
-              -v /opt/safevision/unauthorized_faces:/opt/safevision/unauthorized_faces \
-              --env-file /opt/safevision/.env \
-              "${FULL_IMAGE}"
-            if [ -n "${TAILSCALE_AUTHKEY}" ]; then
-              sudo tailscale up --authkey="${TAILSCALE_AUTHKEY}" --accept-routes --reset || true
-            fi
-          EOF
-          rm /tmp/gce_key
+          gcloud compute ssh ${{ secrets.GCE_VM_NAME }} \
+            --zone=${{ secrets.GCE_VM_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --tunnel-through-iap \
+            --quiet \
+            --command="
+              set -e
+              gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+              docker stop safevision 2>/dev/null || true
+              docker rm safevision 2>/dev/null || true
+              docker system prune -af
+              docker pull \"${FULL_IMAGE}\"
+              sudo mkdir -p /opt/safevision/unauthorized_faces
+              sudo chmod 777 /opt/safevision/unauthorized_faces
+              docker run -d \
+                --name safevision \
+                --restart unless-stopped \
+                --network host \
+                --gpus all \
+                -v /opt/safevision/unauthorized_faces:/opt/safevision/unauthorized_faces \
+                --env-file /opt/safevision/.env \
+                \"${FULL_IMAGE}\"
+              if [ -n \"${TAILSCALE_AUTHKEY}\" ]; then
+                sudo tailscale up --authkey=\"${TAILSCALE_AUTHKEY}\" --accept-routes --reset || true
+              fi
+            "
 
       - name: Verify deployment
         env:
