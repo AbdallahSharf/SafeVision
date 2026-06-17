@@ -101,7 +101,7 @@ jobs:
           GCP_REGION: ${{ env.GCP_REGION }}
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          gcloud compute ssh ${{ secrets.GCE_VM_NAME }} \
+          gcloud compute ssh Abdallah@${{ secrets.GCE_VM_NAME }} \
             --zone=${{ secrets.GCE_VM_ZONE }} \
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --tunnel-through-iap \
