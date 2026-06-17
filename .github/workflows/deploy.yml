@@ -49,15 +49,12 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Sync model files to GCS
+      - name: Sync model files from GCS
         run: |
-          if [ -d "models" ] && [ "$(ls -A models/ 2>/dev/null)" ]; then
-            echo "Syncing models to GCS..."
-            gsutil -m rsync -r -c models/ ${{ secrets.GCS_MODELS_BUCKET }}/
-            echo "Models synced."
-          else
-            echo "No local models dir - assuming already in GCS."
-          fi
+          echo "Downloading models from GCS..."
+          mkdir -p models
+          gsutil -m rsync -r -c ${{ secrets.GCS_MODELS_BUCKET }}/ models/
+          echo "Models downloaded."
 
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
