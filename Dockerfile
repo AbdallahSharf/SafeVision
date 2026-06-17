@@ -20,9 +20,9 @@ COPY requirements.txt .
 RUN sed -i '/torch/d' requirements.txt && \
     sed -i '/onnxruntime/d' requirements.txt && \
     pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu118 && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir onnxruntime-gpu
+    pip install --no-cache-dir onnxruntime-gpu==1.16.3
 
 # Copy application code
 COPY app/ ./app/
