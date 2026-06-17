@@ -17,12 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt/safevision
 
 COPY requirements.txt .
-RUN sed -i '/torch/d' requirements.txt && \
-    sed -i '/onnxruntime/d' requirements.txt && \
-    pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu118 && \
+RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir onnxruntime-gpu==1.16.3
+    pip uninstall -y torch torchvision onnxruntime && \
+    pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir onnxruntime-gpu==1.19.2
 
 # Copy application code
 COPY app/ ./app/
