@@ -4,7 +4,7 @@ uvicorn==0.30.6
 
 # Computer vision
 ultralytics
-nvidia-modelopt==0.43.1
+nvidia-modelopt==0.43.0
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 pillow==10.4.0
