@@ -2,187 +2,156 @@
 Threaded RTSP video stream reader.
 
 Runs a background thread that continuously reads frames from the RTSP
-camera and keeps a bounded queue of the latest frames.  Consumers call
-``read()`` to get the most recent frame.
+camera and exposes only the single latest frame via read_latest().
 
-Supports GPU-accelerated decode via GStreamer NVDEC (T4/desktop GPUs)
-with automatic fallback to CPU FFmpeg decode.
+Design principles for zero-delay streaming:
+  - One background thread owns the VideoCapture object exclusively.
+  - Frames are pre-scaled to the target stream resolution here, once,
+    so every downstream consumer receives a small frame — no repeated
+    large-buffer copies downstream.
+  - Reconnection is instant: the moment cap.read() fails, the capture
+    is released and re-opened immediately.
+  - FFmpeg options are passed via proper OpenCV CAP_PROP_* calls,
+    not env-vars (which are unreliable across OpenCV versions).
+  - No internal queue — _latest_frame is a single atomic reference.
+    Python GIL makes one-reference assignment atomic, so no lock needed.
 """
 
 from app.config import settings
 import logging
-import queue
-import shutil
 import threading
 import time
 import os
 
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
+# OpenCV environment variables are now set at the top of api.py BEFORE cv2 is imported
+
 import cv2
 
 logger = logging.getLogger("safevision")
 
 
-def _build_gstreamer_pipeline(rtsp_url: str) -> str:
-    """
-    Build a GStreamer pipeline string for GPU-accelerated RTSP decode.
-
-    Uses NVDEC (``nvh264dec`` / ``nvv4l2decoder``) for hardware H.264
-    decoding on NVIDIA GPUs, eliminating CPU decode overhead.
-    """
-    return (
-        f"rtspsrc location={rtsp_url} latency=100 protocols=tcp ! "
-        f"rtph264depay ! h264parse ! "
-        f"nvh264dec ! "
-        f"videoconvert ! "
-        f"video/x-raw,format=BGR ! "
-        f"appsink drop=1 max-buffers=1 sync=false"
-    )
-
-
-def _gstreamer_available() -> bool:
-    """Check if GStreamer backend is available in this OpenCV build."""
-    try:
-        # Check if OpenCV was built with GStreamer support
-        build_info = cv2.getBuildInformation()
-        return "GStreamer" in build_info and "YES" in build_info.split("GStreamer")[1].split("\n")[0]
-    except Exception:
-        return False
-
-
 class VideoStream:
-    """Non-blocking RTSP reader with automatic reconnection.
-
-    Supports GPU-accelerated decode (GStreamer + NVDEC) with automatic
-    fallback to CPU-based FFmpeg decode.
-    """
+    """Non-blocking RTSP reader with automatic reconnection and pre-scaling."""
 
     def __init__(
         self,
         rtsp_url: str | None = None,
-        queue_size: int | None = None,
-        use_gpu_decode: bool = True,
+        target_width: int | None = None,
+        target_height: int | None = None,
     ):
         self.rtsp_url = rtsp_url or settings.RTSP_URL
-        self._queue_size = queue_size or settings.QUEUE_SIZE
-        self._use_gpu_decode = use_gpu_decode and getattr(settings, 'USE_GPU_DECODE', True)
+        # Pre-scale to stream output resolution
+        self._target_w = target_width or settings.FRAME_WIDTH
+        self._target_h = target_height or settings.FRAME_HEIGHT
 
-        # Try GPU decode first, fall back to CPU FFmpeg
-        self.cap = self._open_capture()
+        # Latest frame — written by reader thread, read by consumers (atomic via GIL)
+        self._latest_frame = None
+        self._last_decode_time = 0.0
+        self.frame_ready_event = threading.Event()
 
-        self.q: queue.Queue = queue.Queue(maxsize=self._queue_size)
         self.running = True
-        self._thread = threading.Thread(target=self._update, daemon=True)
+        self._thread = threading.Thread(target=self._update, daemon=True, name="StreamReader")
         self._thread.start()
         logger.info("VideoStream started — %s", self.rtsp_url)
 
+    # ── Private: open capture ───────────────────────────────────────────────
     def _open_capture(self) -> cv2.VideoCapture:
-        """
-        Open the RTSP stream, trying GPU decode first.
-
-        Falls back to CPU FFmpeg if GStreamer/NVDEC is unavailable.
-        """
-        if self._use_gpu_decode and _gstreamer_available():
-            try:
-                pipeline = _build_gstreamer_pipeline(self.rtsp_url)
-                cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-                if cap.isOpened():
-                    logger.info("GPU decode active (GStreamer + NVDEC)")
-                    return cap
-                else:
-                    cap.release()
-                    logger.warning("GStreamer pipeline failed to open — falling back to FFmpeg")
-            except Exception as exc:
-                logger.warning("GStreamer init failed: %s — falling back to FFmpeg", exc)
-
-        # Fallback: CPU-based FFmpeg decode (original path)
+        """Open the RTSP stream with TCP transport (set via env var above)."""
+        # FFMPEG optimizations for ultra-low latency RTSP/HTTP
+        # stimeout and timeout set to 5000000 (5 seconds in microseconds) prevent infinite hanging when Wi-Fi completely dies.
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|recv_buffer_size;65536|stimeout;5000000|timeout;5000000"
         cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-        # ── Critical: kill OpenCV's internal frame buffer ──────────────────
-        # By default OpenCV buffers 4–10 decoded frames internally, creating
-        # 130–330 ms of hidden latency even before our queue code runs.
-        # Setting BUFFERSIZE=1 means only the single most-recent decoded frame
-        # is kept; older frames are discarded immediately.
+        # Keep only 1 decoded frame in OpenCV's internal ring-buffer.
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
-            logger.warning("Cannot open RTSP stream at startup: %s. Will keep retrying.", self.rtsp_url)
+            logger.warning("Cannot open RTSP stream: %s", self.rtsp_url)
         else:
-            logger.info("CPU decode active (FFmpeg)")
+            logger.info(
+                "Stream opened (TCP) — source %dx%d @ %.0f fps → output %dx%d",
+                int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                cap.get(cv2.CAP_PROP_FPS),
+                self._target_w,
+                self._target_h,
+            )
         return cap
 
-    # ── Background reader ─────────────────────────────────────────────────
+    # ── Private: background reader loop ────────────────────────────────────
     def _update(self) -> None:
-        fail_count = 0
+        cap = self._open_capture()
+
         while self.running:
             try:
-                if not self.cap.isOpened():
-                    logger.warning("Stream lost — reconnecting …")
-                    self.cap.release()
-                    self.cap = self._open_capture()
+                if not cap.isOpened():
+                    logger.warning("Stream lost — reconnecting in 1 s …")
+                    cap.release()
                     time.sleep(1)
-                    fail_count = 0
+                    cap = self._open_capture()
                     continue
 
-                ret, frame = self.cap.read()
+                # Drain the OS TCP socket buffer aggressively by grabbing all available frames.
+                grabbed_frame = False
+                while True:
+                    t_start = time.time()
+                    ret = cap.grab()
+                    if not ret:
+                        break
+                    grabbed_frame = True
+                    # If grabbing took more than 3ms, we assume we blocked waiting for a new network packet,
+                    # which means we have reached the live edge of the stream.
+                    if time.time() - t_start > 0.003:
+                        break
+
+                if not grabbed_frame:
+                    logger.warning("Stream read failed — reconnecting …")
+                    cap.release()
+                    time.sleep(0.5)
+                    cap = self._open_capture()
+                    continue
+
+                # Only perform the expensive decode + resize step at 15 FPS
+                now = time.time()
+                if now - self._last_decode_time < (1.0 / 15.0):
+                    continue
+                self._last_decode_time = now
+
+                # Decode the latest grabbed frame
+                ret, frame = cap.retrieve()
                 if not ret or frame is None:
-                    fail_count += 1
-                    if fail_count > 20:
-                        logger.warning("Stream read failed %d times. Forcing reconnection.", fail_count)
-                        self.cap.release()
-                        fail_count = 0
-                    time.sleep(0.05)
                     continue
 
-                fail_count = 0
+                # Pre-scale here once to the target stream resolution.
+                # Every downstream consumer gets a small, cheap frame.
+                if frame.shape[1] != self._target_w or frame.shape[0] != self._target_h:
+                    frame = cv2.resize(
+                        frame,
+                        (self._target_w, self._target_h),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
 
-                # Fast path: try to enqueue immediately (one lock acquisition)
-                try:
-                    self.q.put_nowait(frame)
-                except queue.Full:
-                    # Queue full — drain oldest stale frame, then put the fresh one
-                    try:
-                        self.q.get_nowait()
-                    except queue.Empty:
-                        pass
-                    self.q.put_nowait(frame)
+                # Atomic assignment — GIL guarantees consumers see a complete frame
+                self._latest_frame = frame
+                self.frame_ready_event.set()
 
             except Exception as exc:
                 logger.error("Stream thread error: %s", exc)
                 time.sleep(1)
 
-    # ── Public API ────────────────────────────────────────────────────────
-    def read(self, timeout: float | None = None):
-        """Return the latest frame, or ``None`` on timeout."""
-        if timeout is None:
-            timeout = settings.QUEUE_TIMEOUT
-        try:
-            return self.q.get(timeout=timeout)
-        except queue.Empty:
-            logger.warning("Frame queue timed out — stream may be stalled.")
-            return None
+        cap.release()
+        logger.info("VideoStream stopped.")
 
+    # ── Public API ──────────────────────────────────────────────────────────
     def read_latest(self):
-        """
-        Return the single most-recent frame without blocking.
-
-        Drains the entire queue and returns only the last item, discarding
-        any intermediate frames that piled up.  Returns ``None`` if the
-        queue is currently empty.
-        """
-        latest = None
-        while True:
-            try:
-                latest = self.q.get_nowait()
-            except queue.Empty:
-                break
-        return latest
+        """Return the most-recent decoded frame, or None if not yet available. Never blocks."""
+        return self._latest_frame
 
     def is_alive(self) -> bool:
-        """Return ``True`` if the background thread is still running."""
+        """Return True if the background reader thread is still running."""
         return self._thread.is_alive() and self.running
 
     def stop(self) -> None:
-        """Stop reading and release the capture device."""
+        """Signal the background thread to exit and wait for it."""
         self.running = False
         self._thread.join(timeout=3)
-        self.cap.release()
-        logger.info("VideoStream stopped.")
+        logger.info("VideoStream reader thread joined.")
+

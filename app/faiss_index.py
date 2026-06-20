@@ -84,8 +84,13 @@ class LocalFaceIndex:
 
         if not docs:
             logger.warning("No enrolled faces found in MongoDB — FAISS index is empty")
-            self._loaded = True
-            self._last_sync = time.time()
+            with self._lock:
+                self._names = []
+                self._embeddings = None
+                if _FAISS_AVAILABLE:
+                    self._index = faiss.IndexFlatIP(self.dimension)
+                self._loaded = True
+                self._last_sync = time.time()
             return 0
 
         names: list[str] = []
@@ -150,15 +155,17 @@ class LocalFaceIndex:
         with self._lock:
             n_total = len(self._names)
             if n_total == 0:
-                return "Unauthorized", 0.0
+                return None, 0.0
             # Snapshot for thread safety
             names_snapshot = list(self._names)
+            index_snapshot = self._index
+            embeddings_snapshot = self._embeddings
 
         query = query_embedding.reshape(1, -1).astype(np.float32)
         k = min(top_k, n_total)
 
-        if _FAISS_AVAILABLE and self._index is not None:
-            scores, indices = self._index.search(query, k)
+        if _FAISS_AVAILABLE and index_snapshot is not None:
+            scores, indices = index_snapshot.search(query, k)
             results = [
                 (names_snapshot[idx], float(score))
                 for score, idx in zip(scores[0], indices[0])
@@ -166,8 +173,9 @@ class LocalFaceIndex:
             ]
         else:
             # Numpy fallback: dot product (= cosine similarity on L2-normed vectors)
-            with self._lock:
-                sims = (self._embeddings @ query.T).flatten()
+            if embeddings_snapshot is None or len(embeddings_snapshot) == 0:
+                return None, 0.0
+            sims = (embeddings_snapshot @ query.T).flatten()
             top_indices = np.argsort(-sims)[:k]
             results = [
                 (names_snapshot[idx], float(sims[idx]))
@@ -175,7 +183,7 @@ class LocalFaceIndex:
             ]
 
         if not results:
-            return "Unauthorized", 0.0
+            return None, 0.0
 
         # Group by name, keep highest score per person
         scores_by_name: Dict[str, float] = {}
@@ -194,7 +202,7 @@ class LocalFaceIndex:
         if best_score >= effective_threshold:
             return best_name, best_score
 
-        return "Unauthorized", best_score
+        return None, best_score
 
     def rebuild(self, faces_collection) -> int:
         """

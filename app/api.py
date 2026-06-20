@@ -7,23 +7,23 @@ Phase 4 refactor: performance optimizations.
   - FAISS local index initialization and periodic sync
   - All existing endpoints preserved
 
-Pipeline Architecture (3 threads + inference/DB background threads):
+Pipeline Architecture (4 threads + inference/DB background threads):
 
   Thread 1 — _reader_loop()
       Reads raw frames from the RTSP VideoStream and puts them into
-      _rtsp_queue.  Drops the oldest frame when the queue is full so the
-      system always works with the freshest available image.
-      Signals _new_frame_event for MJPEG consumers.
+      _rtsp_queue. Ensures the network buffer never overflows.
 
   Thread 2 — _detector_loop()
-      Pops raw frames from _rtsp_queue, runs Stage 1 of FrameProcessor
-      (YOLO with frame-skipping), and pushes (frame, boxes) pairs into
-      _detect_queue.
+      Pops raw frames from _rtsp_queue, runs YOLO detection, and pushes 
+      (frame, boxes) pairs into _detect_queue.
 
   Thread 3 — _recognizer_loop()
-      Pops (frame, boxes) from _detect_queue, runs Stage 2 of
-      FrameProcessor (ArcFace + tracker), and stores the result
-      in _latest_ai_results.
+      Pops (frame, boxes) from _detect_queue, runs ArcFace, and stores 
+      the result in _latest_ai_results.
+
+  Thread 4 — _jpeg_encoder_loop()
+      Takes the freshest camera frame and the latest AI boxes, draws the
+      overlays, encodes to JPEG, and updates the MJPEG streamer state.
 
 Endpoints
 ---------
@@ -41,6 +41,9 @@ import threading
 import time
 from contextlib import asynccontextmanager
 
+import os
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|recv_buffer_size;65536|stimeout;5000000|timeout;5000000"
+
 import cv2
 import numpy as np
 from fastapi import FastAPI, Depends, HTTPException, status
@@ -57,136 +60,179 @@ from app.alerts import init_firebase
 logger = logging.getLogger("safevision")
 
 # ---------------------------------------------------------------------------
-# Shared state (populated on startup)
+# Lock-free shared state — separate atomic variables (Component 4)
+# Each thread only writes its own variable, no read-modify-write races.
+# Python GIL makes single reference assignment atomic.
 # ---------------------------------------------------------------------------
 _video_stream: VideoStream | None = None
 _processor: FrameProcessor | None = None
 _start_time: float = 0.0
 
-# Inter-thread queues — size 2 gives a one-frame burst cushion without accumulating lag
-_rtsp_queue: queue.Queue = queue.Queue(maxsize=2)     # raw BGR frames
-_detect_queue: queue.Queue = queue.Queue(maxsize=2)   # (preprocessed_frame, boxes)
+# Queues for inter-thread communication
+_rtsp_queue: queue.Queue = queue.Queue(maxsize=1)
+_detect_queue: queue.Queue = queue.Queue(maxsize=1)
 
-# Latest AI results (faces, names, boxes)
-_latest_ai_results: list = []
-# Latest RAW frame direct from camera (fast path)
-_latest_raw_unprocessed: np.ndarray | None = None
-_frame_lock = threading.Lock()
+# Atomic variables — each written by exactly ONE thread (no races)
+_latest_raw_frame: np.ndarray | None = None         # written by reader thread only
+_latest_ai_results: list = []                       # written by recognizer thread only
+_latest_ai_fps: float = 0.0                         # written by recognizer thread only
 
-# Event-driven MJPEG — replaces CPU-burning spin-loop
-_new_frame_event = threading.Event()
+# Pre-encoded JPEG bytes from the encoder thread
+_latest_jpeg_bytes: bytes | None = None
+_latest_frame_id: int = 0
 
-def get_latest_fast_frame():
-    """Return the latest raw camera frame for the low-latency MJPEG fast-path."""
-    with _frame_lock:
-        return _latest_raw_unprocessed
+# Event fired by the reader every time a new frame arrives.
+# The JPEG encoder and MJPEG generator wait on this instead of spinning.
+_new_frame_event: threading.Event = threading.Event()
 
-# Thread handles (daemon=True so they die when the main process exits)
+# Event fired by the reader to notify the YOLO detector thread
+_new_detector_frame_event: threading.Event = threading.Event()
+
+# Thread handles
 _reader_thread: threading.Thread | None = None
 _detector_thread: threading.Thread | None = None
 _recognizer_thread: threading.Thread | None = None
+_jpeg_encoder_thread: threading.Thread | None = None
 _faiss_sync_thread: threading.Thread | None = None
 
 
 # ---------------------------------------------------------------------------
-# Pipeline threads
+# Main Pipeline Thread
 # ---------------------------------------------------------------------------
 def _reader_loop() -> None:
-    """
-    Thread 1 — RTSP reader.
-
-    Uses read_latest() to always grab the single freshest frame from the
-    VideoStream, discarding any intermediate frames that built up while the
-    detector was busy.  Also writes every raw frame directly to
-    _latest_raw_unprocessed for the low-latency MJPEG fast-path.
-
-    Signals _new_frame_event to wake up MJPEG consumers without spin-waiting.
-    """
-    global _latest_raw_unprocessed
+    global _latest_raw_frame
     logger.info("Reader thread started.")
     while _video_stream and _video_stream.is_alive():
-        # read_latest() drains the queue and returns only the freshest frame
+        # Block until the VideoStream reader thread signals a new frame is ready
+        _video_stream.frame_ready_event.wait(timeout=1.0)
+        _video_stream.frame_ready_event.clear()
+
         frame = _video_stream.read_latest()
-        if frame is None:
-            # Queue was empty — wait a short time then try again
-            time.sleep(0.005)
-            continue
-
-        # Fast-path: expose raw frame immediately for MJPEG (no pipeline delay)
-        with _frame_lock:
-            _latest_raw_unprocessed = frame
-
-        # Signal MJPEG generator that a new frame is available
-        _new_frame_event.set()
-
-        # Push into YOLO/recognition pipeline (drops oldest if detector is behind)
-        try:
-            _rtsp_queue.put_nowait(frame)
-        except queue.Full:
-            try:
-                _rtsp_queue.get_nowait()
-            except queue.Empty:
-                pass
-            _rtsp_queue.put_nowait(frame)
-    logger.info("Reader thread exited.")
-
+        if frame is not None:
+            _latest_raw_frame = frame
+            # Signal the encoder and detector threads that a new frame is ready
+            _new_frame_event.set()
+            _new_detector_frame_event.set()
 
 def _detector_loop() -> None:
-    """
-    Thread 2 — YOLO detector.
-
-    Pops raw frames from _rtsp_queue, runs Stage 1 of FrameProcessor
-    (preprocessing + YOLO with frame-skipping), and pushes results into
-    _detect_queue.
-    """
     logger.info("Detector thread started.")
-    while True:
+    last_detected_frame = None
+    last_detect_time = 0.0
+    # Run YOLO at max 5 FPS. YOLO holds the GPU lock for ~100ms per call.
+    # Without this limit, YOLO runs on every camera frame (25 FPS) and holds
+    # the GPU lock 100% of the time, starving ArcFace and causing 1 FPS AI output.
+    # At 5 FPS detection, YOLO uses only ~50% of GPU lock time, leaving the rest
+    # for ArcFace to run smoothly.
+    min_detect_interval = 1.0 / 5  # 200ms between YOLO calls
+    while _video_stream and _video_stream.is_alive():
         try:
-            raw_frame = _rtsp_queue.get(timeout=2.0)
-        except queue.Empty:
-            if not (_video_stream and _video_stream.is_alive()):
-                break
-            continue
+            # Block until reader thread signals a new frame is available
+            _new_detector_frame_event.wait(timeout=1.0)
+            _new_detector_frame_event.clear()
 
-        preprocessed, boxes = _processor.detect(raw_frame)
+            frame = _latest_raw_frame
+            if frame is None or frame is last_detected_frame:
+                continue
 
-        if _detect_queue.full():
+            # Rate-limit: skip frames if it's too soon since last YOLO call
+            now = time.time()
+            if now - last_detect_time < min_detect_interval:
+                continue
+
+            last_detected_frame = frame
+            last_detect_time = now
+            t0 = time.time()
+            raw_frame, boxes = _processor.detect(frame)
+            t1 = time.time()
+            if t1 - t0 > 0.05:
+                logger.warning(f"Detect took {t1-t0:.3f}s")
+            # Drop stale detections if recognizer is busy; always keep newest
             try:
                 _detect_queue.get_nowait()
             except queue.Empty:
                 pass
-        _detect_queue.put((preprocessed, boxes))
-
-    logger.info("Detector thread exited.")
-
+            _detect_queue.put_nowait((raw_frame, boxes))
+        except Exception as exc:
+            logger.error("Detector thread error: %s", exc)
 
 def _recognizer_loop() -> None:
-    """
-    Thread 3 — ArcFace recognizer.
-
-    Pops (frame, boxes) from _detect_queue, runs Stage 2 of
-    FrameProcessor (ArcFace + ByteTrack smoothing), and stores
-    the result in _latest_ai_results.
-    """
-    global _latest_ai_results
+    global _latest_ai_results, _latest_ai_fps
     logger.info("Recognizer thread started.")
-    while True:
+    while _video_stream and _video_stream.is_alive():
         try:
-            frame, boxes = _detect_queue.get(timeout=2.0)
+            frame, boxes = _detect_queue.get(timeout=1.0)
+            t0 = time.time()
+            ai_result = _processor.recognize_faces(frame, boxes)
+            t1 = time.time()
+            if t1 - t0 > 0.05:
+                logger.warning(f"Recognize took {t1-t0:.3f}s for {len(boxes)} boxes")
+            _latest_ai_results = ai_result.faces
+            _latest_ai_fps = ai_result.fps
         except queue.Empty:
-            if not (_video_stream and _video_stream.is_alive()):
-                break
             continue
-
-        try:
-            result = _processor.recognize_faces(frame, boxes)
-
-            with _frame_lock:
-                _latest_ai_results = result.faces
         except Exception as exc:
             logger.error("Recognizer thread error: %s", exc)
 
-    logger.info("Recognizer thread exited.")
+def _jpeg_encoder_loop() -> None:
+    global _latest_jpeg_bytes, _latest_frame_id
+    logger.info("JPEG encoder thread started.")
+    min_interval = 1.0 / max(1, settings.TARGET_STREAM_FPS)
+    last_encode_time = 0.0
+
+    while _video_stream and _video_stream.is_alive():
+        # Block here until the reader signals a new frame — no CPU burn
+        _new_frame_event.wait(timeout=1.0)
+        _new_frame_event.clear()
+
+        now = time.time()
+        if now - last_encode_time < min_interval:
+            # Cap encoding rate to TARGET_STREAM_FPS, but don't sleep —
+            # just skip this frame and wait for the next event.
+            continue
+        last_encode_time = now
+
+        frame = _latest_raw_frame
+        if frame is None:
+            continue
+
+        # frame is already pre-scaled to FRAME_WIDTH x FRAME_HEIGHT by stream.py
+        serve = frame.copy()
+
+        # Draw bounding boxes from _latest_ai_results
+        h, w = serve.shape[:2]
+        sx_scale = w / 1280.0
+        sy_scale = h / 720.0
+        base_thickness = max(1, int(2 * min(sx_scale, sy_scale)))
+        font_scale = max(0.5, 0.8 * min(sx_scale, sy_scale))
+
+        faces = list(_latest_ai_results)
+        fps = _latest_ai_fps
+
+        for face in faces:
+            bx1, by1, bx2, by2 = face.bbox
+            color = (0, 255, 0) if face.name not in ("Unauthorized", "Unknown", "Too Blurry") else (0, 0, 255)
+            cv2.rectangle(serve, (bx1, by1), (bx2, by2), color, base_thickness)
+
+            label = face.name
+            cv2.putText(
+                serve, label, (bx1, max(10, by1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, base_thickness
+            )
+
+        fps_scale = max(0.6, 0.8 * min(sx_scale, sy_scale))
+        fps_thickness = max(1, int(2 * min(sx_scale, sy_scale)))
+        cv2.putText(
+            serve, f"AI FPS: {fps:.1f}", (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX, fps_scale, (255, 255, 0), fps_thickness
+        )
+
+        _, jpeg = cv2.imencode(
+            ".jpg", serve,
+            [int(cv2.IMWRITE_JPEG_QUALITY), settings.STREAM_JPEG_QUALITY]
+        )
+
+        _latest_jpeg_bytes = jpeg.tobytes()
+        _latest_frame_id += 1
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +252,28 @@ def _faiss_sync_loop() -> None:
             count = faiss_index.rebuild(faces_collection)
             # Also reload adaptive thresholds since enrollments may have changed
             reload_thresholds()
+            if _processor is not None:
+                _processor.clear_cache()
             logger.info("FAISS periodic sync complete — %d embeddings.", count)
+            
+            # Clean up unauthorized faces older than 7 days
+            try:
+                faces_dir = "/opt/safevision/unauthorized_faces"
+                if os.path.exists(faces_dir):
+                    now_time = time.time()
+                    deleted_count = 0
+                    for filename in os.listdir(faces_dir):
+                        file_path = os.path.join(faces_dir, filename)
+                        if os.path.isfile(file_path):
+                            # 7 days = 7 * 24 * 60 * 60 = 604800 seconds
+                            if os.stat(file_path).st_mtime < now_time - 604800:
+                                os.remove(file_path)
+                                deleted_count += 1
+                    if deleted_count > 0:
+                        logger.info("Cleaned up %d old unauthorized face photos (older than 7 days).", deleted_count)
+            except Exception as e:
+                logger.warning("Failed to clean up old faces: %s", e)
+
         except Exception as exc:
             logger.warning("FAISS periodic sync failed: %s", exc)
 
@@ -216,9 +283,9 @@ def _faiss_sync_loop() -> None:
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start the 3-thread pipeline on startup; clean up on shutdown."""
+    """Start the background pipeline on startup; clean up on shutdown."""
     global _video_stream, _processor, _start_time
-    global _reader_thread, _detector_thread, _recognizer_thread, _faiss_sync_thread
+    global _reader_thread, _detector_thread, _recognizer_thread, _jpeg_encoder_thread, _faiss_sync_thread
 
     _start_time = time.time()
 
@@ -235,20 +302,23 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("FAISS index failed to load — will use MongoDB fallback: %s", exc)
 
-    # Start all three pipeline threads
-    _reader_thread = threading.Thread(target=_reader_loop, daemon=True, name="sv-reader")
-    _detector_thread = threading.Thread(target=_detector_loop, daemon=True, name="sv-detector")
-    _recognizer_thread = threading.Thread(target=_recognizer_loop, daemon=True, name="sv-recognizer")
-
+    _reader_thread = threading.Thread(target=_reader_loop, daemon=True, name="ReaderThread")
     _reader_thread.start()
+
+    _detector_thread = threading.Thread(target=_detector_loop, daemon=True, name="DetectorThread")
     _detector_thread.start()
+    
+    _recognizer_thread = threading.Thread(target=_recognizer_loop, daemon=True, name="RecognizerThread")
     _recognizer_thread.start()
+
+    _jpeg_encoder_thread = threading.Thread(target=_jpeg_encoder_loop, daemon=True, name="JPEGEncoderThread")
+    _jpeg_encoder_thread.start()
 
     # Start FAISS periodic sync thread
     _faiss_sync_thread = threading.Thread(target=_faiss_sync_loop, daemon=True, name="sv-faiss-sync")
     _faiss_sync_thread.start()
 
-    logger.info("SafeVision API is ready — 3-thread pipeline active + FAISS index.")
+    logger.info("SafeVision API is ready — multi-threaded pipeline active.")
     yield  # ── app is running ──
 
     # Shutdown — VideoStream.stop() signals the reader loop to exit
@@ -311,63 +381,35 @@ async def root():
     }
 
 
+# ---------------------------------------------------------------------------
+# MJPEG Stream Endpoint
+# ---------------------------------------------------------------------------
 def _generate_mjpeg():
     """
-    Low-latency MJPEG generator — event-driven.
+    Low-latency MJPEG generator — yields pre-encoded JPEG bytes.
 
-    Architecture: Decoupled AI streaming
-    ────────────────────────────
-    The generator pulls the absolute freshest raw frame from the camera,
-    scales it, draws the latest known bounding boxes on it, and sends it.
-    This runs completely asynchronously to the AI pipeline, guaranteeing
-    a smooth stream (e.g. 30 FPS) even if the AI is processing at 15 FPS.
-
-    Uses threading.Event instead of a spin-loop to avoid burning CPU.
+    Waits on _new_frame_event instead of spinning with time.sleep().
+    This avoids the 10ms polling anti-pattern that can starve other
+    async FastAPI coroutines.
     """
+    last_yielded_id = -1
+
     while True:
-        # Block efficiently until a new frame is available (or timeout 100ms)
-        _new_frame_event.wait(timeout=0.1)
-        _new_frame_event.clear()
+        # Block until the encoder signals a new JPEG is ready
+        _new_frame_event.wait(timeout=1.0)
 
-        with _frame_lock:
-            raw = _latest_raw_unprocessed
-            ai_results = list(_latest_ai_results)  # shallow copy for thread safety
-            current_fps = _processor.fps if _processor else 0.0
-
-        if raw is None:
+        current_id = _latest_frame_id
+        if current_id == last_yielded_id:
             continue
 
-        # Resize to match the AI bounding box coordinate space
-        serve = cv2.resize(raw, (settings.FRAME_WIDTH, settings.FRAME_HEIGHT))
-        
-        # Draw the latest AI results on the frame
-        for face in ai_results:
-            x1, y1, x2, y2 = face.bbox
-            identity = face.name
-            score = face.confidence
-            
-            color = (0, 255, 0) if identity not in ("Unauthorized", "Unknown", "Checking...") else (0, 0, 255)
-            cv2.rectangle(serve, (x1, y1), (x2, y2), color, 2)
-            
-            label = f"{identity} ({score:.2f})" if score > 0 else identity
-            cv2.putText(
-                serve, label, (x1, max(10, y1 - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2
-            )
+        last_yielded_id = current_id
+        jpeg_bytes = _latest_jpeg_bytes
+        if jpeg_bytes is None:
+            continue
 
-        # Draw AI FPS overlay
-        cv2.putText(
-            serve, f"AI FPS: {current_fps:.1f}", (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2
-        )
-
-        _, jpeg = cv2.imencode(
-            ".jpg", serve,
-            [int(cv2.IMWRITE_JPEG_QUALITY), settings.STREAM_JPEG_QUALITY]
-        )
         yield (
             b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" + jpeg_bytes + b"\r\n"
         )
 
 @app.get("/stream", tags=["video"])
@@ -407,17 +449,18 @@ async def health():
 async def status():
     """Detailed system status."""
     face_count = faces_collection.count_documents({})
-    reader_alive = _reader_thread is not None and _reader_thread.is_alive()
-    detector_alive = _detector_thread is not None and _detector_thread.is_alive()
-    recognizer_alive = _recognizer_thread is not None and _recognizer_thread.is_alive()
+    
+    threads_alive = {
+        "reader": _reader_thread is not None and _reader_thread.is_alive(),
+        "detector": _detector_thread is not None and _detector_thread.is_alive(),
+        "recognizer": _recognizer_thread is not None and _recognizer_thread.is_alive(),
+        "encoder": _jpeg_encoder_thread is not None and _jpeg_encoder_thread.is_alive(),
+    }
+    
     faiss_index = get_faiss_index()
     return {
         "stream_connected": _video_stream is not None and _video_stream.is_alive(),
-        "pipeline": {
-            "reader": "running" if reader_alive else "stopped",
-            "detector": "running" if detector_alive else "stopped",
-            "recognizer": "running" if recognizer_alive else "stopped",
-        },
+        "pipeline": threads_alive,
         "fps": _processor.fps if _processor else 0,
         "faces_in_db": face_count,
         "faiss_index": {
@@ -428,6 +471,8 @@ async def status():
         "config": {
             "frame_size": f"{settings.FRAME_WIDTH}x{settings.FRAME_HEIGHT}",
             "jpeg_quality": settings.STREAM_JPEG_QUALITY,
+            "target_stream_fps": settings.TARGET_STREAM_FPS,
+            "detect_every_n_frames": settings.DETECT_EVERY_N_FRAMES,
             "blur_threshold": settings.BLUR_THRESHOLD,
             "yolo_conf": settings.YOLO_CONF_THRESHOLD,
             "recog_threshold": settings.RECOG_THRESHOLD,
@@ -476,9 +521,11 @@ async def admin_reload_thresholds():
     try:
         reload_thresholds()
         count = get_faiss_index().rebuild(faces_collection)
+        if _processor is not None:
+            _processor._track_cache.clear()
         return {
             "status": "ok",
-            "message": "Thresholds reloaded and FAISS index rebuilt.",
+            "message": "Thresholds reloaded, FAISS index rebuilt, and track cache cleared.",
             "faiss_embeddings": count,
         }
     except Exception as exc:

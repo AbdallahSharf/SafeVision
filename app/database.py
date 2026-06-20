@@ -107,13 +107,15 @@ def compute_identity_thresholds() -> Dict[str, float]:
             similarities = sim_matrix[upper_idx]
 
             if len(similarities) == 0:
+                thresholds[name] = 0.45
+                logger.info("Calibrated threshold for '%s': 0.450 (fallback for 1 embedding)", name)
                 continue
 
             mean_sim = float(similarities.mean())
             std_sim  = float(similarities.std())
 
-            # threshold = mean - 1.5σ, clamped between 0.3 and 0.95
-            calibrated = float(np.clip(mean_sim - 1.5 * std_sim, 0.30, 0.95))
+            # threshold = mean - 1.5σ, clamped between 0.30 and 0.55 (to prevent it being too strict)
+            calibrated = float(np.clip(mean_sim - 1.5 * std_sim, 0.30, 0.55))
             thresholds[name] = calibrated
 
             logger.info(

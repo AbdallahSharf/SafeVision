@@ -82,60 +82,88 @@ def _collect_image_paths(source: str) -> list[Path]:
 
 def _embed(image_path: Path, arcface) -> np.ndarray | None:
     """
-    Load an image, detect the largest face region, compute ArcFace embedding.
-
-    Returns L2-normalised 512-d embedding, or None if no face can be processed.
+    Load an image, detect the largest face region using YOLO (if available), 
+    and compute ArcFace embedding using the exact same resizing math as the live stream.
     """
     img = cv2.imread(str(image_path))
     if img is None:
         print(f"  ⚠️  Could not read '{image_path.name}' — skipping.")
         return None
 
-    # Use a simple face crop heuristic: resize to 112×112 centered
-    # (works well when the image is a portrait / passport-style photo)
-    # If you have RetinaFace available, replace this with proper detection.
     h, w = img.shape[:2]
-
-    # Try to detect a face using OpenCV's built-in Haar cascade as a fallback
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
-
-    if len(faces) > 0:
-        # Use the largest detected face
-        faces_sorted = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
-        fx, fy, fw, fh = faces_sorted[0]
-        # Add 20% margin
-        margin_x = int(fw * 0.20)
-        margin_y = int(fh * 0.20)
-        fx = max(0, fx - margin_x)
-        fy = max(0, fy - margin_y)
-        fw = min(w - fx, fw + 2 * margin_x)
-        fh = min(h - fy, fh + 2 * margin_y)
-        face_crop = img[fy:fy + fh, fx:fx + fw]
+    
+    # Check if the image is already a tight crop (like those from unauthorized_faces)
+    # If it's a small image (e.g. < 400x400), it's likely a crop. We skip YOLO to avoid 
+    # detecting a face inside a face, and just use the whole image like the live stream does.
+    face_resized = None
+    if w < 400 and h < 400:
+        face_crop = img
     else:
-        # No face detected — use center crop (works for tightly-cropped portrait photos)
-        print(f"  ℹ️  No face detected in '{image_path.name}' — using center crop.")
-        short = min(h, w)
-        cy, cx = h // 2, w // 2
-        face_crop = img[cy - short // 2:cy + short // 2, cx - short // 2:cx + short // 2]
+        # For large images, try to use YOLO to match the live stream bounding boxes
+        try:
+            from app.models_loader import get_yolo
+            from app.config import settings
+            from app.processor import align_face
+            
+            yolo = get_yolo()
+            # Run YOLO exactly like processor.py does
+            yolo_results = yolo(img, verbose=False, conf=settings.YOLO_CONF_THRESHOLD)
+            r = yolo_results[0]
+            boxes = r.boxes.xyxy.cpu().numpy()
+            
+            if len(boxes) > 0:
+                # Get the largest box
+                areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+                largest_idx = np.argmax(areas)
+                
+                # Check for keypoints and align
+                kpts = None
+                if hasattr(r, 'keypoints') and r.keypoints is not None:
+                    if len(r.keypoints.xy) > largest_idx and r.keypoints.xy[largest_idx].shape[0] == 5:
+                        kpts = r.keypoints.xy[largest_idx].cpu().numpy()
+                
+                if kpts is not None:
+                    try:
+                        face_resized = align_face(img, kpts)
+                    except Exception as e:
+                        print(f"  ⚠️  Face alignment failed ({e}) — falling back to crop.")
+                
+                if face_resized is None:
+                    x1, y1, x2, y2 = boxes[largest_idx].astype(int)
+                    # Apply the same margin as processor.py
+                    x1 = max(0, x1 - settings.FACE_MARGIN)
+                    y1 = max(0, y1 - settings.FACE_MARGIN)
+                    x2 = min(w, x2 + settings.FACE_MARGIN)
+                    y2 = min(h, y2 + settings.FACE_MARGIN)
+                    face_crop = img[y1:y2, x1:x2]
+            else:
+                print(f"  ℹ️  No face detected by YOLO in '{image_path.name}' — using full image.")
+                face_crop = img
+        except Exception as e:
+            print(f"  ⚠️  YOLO failed ({e}) — using full image.")
+            face_crop = img
 
-    if face_crop.size == 0:
-        print(f"  ⚠️  Empty crop for '{image_path.name}' — skipping.")
-        return None
+    if face_resized is None:
+        if face_crop.size == 0:
+            print(f"  ⚠️  Empty crop for '{image_path.name}' — skipping.")
+            return None
 
+        # Resize to exactly 112x112 with stretching, matching the live stream's cv2.resize
+        face_resized = cv2.resize(face_crop, (112, 112))
+    
     # Check sharpness — warn if blurry (Laplacian variance)
-    blur_score = cv2.Laplacian(face_crop, cv2.CV_64F).var()
+    blur_score = cv2.Laplacian(face_resized, cv2.CV_64F).var()
     if blur_score < 40:
         print(f"  ⚠️  '{image_path.name}' is very blurry (score={blur_score:.0f}) — embedding may be unreliable.")
 
-    # Resize to ArcFace input size and convert to RGB
-    face_resized = cv2.resize(face_crop, (112, 112))
+    # Convert to RGB and embed
     face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
+    
+    # Apply the same enhancement as live stream!
+    from app.enhancement import enhance_face
+    face_enhanced = enhance_face(face_rgb)
 
-    embedding = arcface.get_feat(face_rgb).flatten()
+    embedding = arcface.get_feat(face_enhanced).flatten()
     norm = np.linalg.norm(embedding)
     if norm == 0:
         print(f"  ⚠️  Zero-norm embedding for '{image_path.name}' — skipping.")

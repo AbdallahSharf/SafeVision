@@ -81,11 +81,15 @@ class ArcFaceONNX:
         -------
         np.ndarray  shape (1, 512)
         """
-        # (H, W, C) → (1, C, H, W)  +  normalise to [-1, 1]
+        # (1, 3, 112, 112)
         x = face_rgb.astype(np.float32)
         x = (x - 127.5) / 128.0
-        x = x.transpose(2, 0, 1)[np.newaxis, ...]          # (1,3,112,112)
-        return self._session.run([self._output_name], {self._input_name: x})[0]
+        x = x.transpose(2, 0, 1)[np.newaxis, ...]
+        
+        emb = self._session.run([self._output_name], {self._input_name: x})[0]
+        # L2 normalize for cosine similarity
+        norm = np.linalg.norm(emb)
+        return emb / max(norm, 1e-10)
 
     def get_feats(self, faces_rgb: list[np.ndarray]) -> np.ndarray:
         """
@@ -112,9 +116,13 @@ class ArcFaceONNX:
             for face in faces_rgb
         ], axis=0)  # (N, 3, 112, 112)
 
-        return self._session.run(
+        embeddings = self._session.run(
             [self._output_name], {self._input_name: batch}
         )[0]  # (N, 512)
+        
+        # L2 normalize for cosine similarity
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        return embeddings / np.clip(norms, 1e-10, None)
 
 
 # ---------------------------------------------------------------------------

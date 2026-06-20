@@ -4,10 +4,12 @@ uvicorn==0.30.6
 
 # Computer vision
 ultralytics
-nvidia-modelopt==0.43.0
+nvidia-modelopt[onnx]
+onnx_graphsurgeon --extra-index-url https://pypi.ngc.nvidia.com
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 pillow==10.4.0
+scikit-image>=0.21.0
 
 # Deep learning (CPU — switch to cu121 builds when GPU VM is ready)
 torch==2.4.1

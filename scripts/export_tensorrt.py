@@ -6,10 +6,20 @@ def export_models():
     print("Exporting YOLO to TensorRT...")
     yolo_path = "models/best.pt"
     if os.path.exists(yolo_path):
+        engine_path = yolo_path.replace('.pt', '.engine')
+        if os.path.exists(engine_path):
+            print(f"TensorRT engine already exists at {engine_path}, skipping export.")
+            return
+
+        print("Exporting YOLO to TensorRT...")
         model = YOLO(yolo_path)
-        # Export to ONNX first, then TensorRT
-        model.export(format="engine", device="0", half=True, dynamic=True)
-        print("YOLO exported successfully!")
+        try:
+            # Export to ONNX first, then TensorRT
+            model.export(format="engine", device="0", half=True, dynamic=True)
+            print("YOLO exported successfully!")
+        except Exception as e:
+            print(f"Failed to export YOLO to TensorRT: {e}")
+            print("The system will fall back to using PyTorch/ONNX if supported.")
     else:
         print(f"Model not found at {yolo_path}")
 

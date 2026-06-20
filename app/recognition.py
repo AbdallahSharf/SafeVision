@@ -138,7 +138,7 @@ def recognize_face(
             {
                 "$vectorSearch": {
                     "index": "vector_index",
-                    "queryVector": embedding.tolist(),
+                    "queryVector": embedding.flatten().tolist(),
                     "path": "embedding",
                     "numCandidates": settings.DB_NUM_CANDIDATES,
                     "limit": settings.DB_TOP_K,
@@ -161,8 +161,12 @@ def recognize_face(
         scores_by_name: Dict[str, float] = {}
         for match in results:
             name = match.get("name", "Unknown")
-            score = match.get("score", 0.0)
-            if score > scores_by_name.get(name, 0.0):
+            raw_score = match.get("score", 0.0)
+            # MongoDB Atlas $vectorSearch 'cosine' metric returns (1 + cosine) / 2
+            # We must convert it back to raw cosine similarity to match FAISS and our thresholds
+            score = (2.0 * raw_score) - 1.0
+            
+            if score > scores_by_name.get(name, -1.0):
                 scores_by_name[name] = score
 
         best_name = max(scores_by_name, key=scores_by_name.__getitem__)
@@ -213,7 +217,7 @@ async def async_recognize_face(
             {
                 "$vectorSearch": {
                     "index": "vector_index",
-                    "queryVector": embedding.tolist(),
+                    "queryVector": embedding.flatten().tolist(),
                     "path": "embedding",
                     "numCandidates": settings.DB_NUM_CANDIDATES,
                     "limit": settings.DB_TOP_K,
@@ -236,8 +240,9 @@ async def async_recognize_face(
         scores_by_name: Dict[str, float] = {}
         for match in results:
             name = match.get("name", "Unknown")
-            score = match.get("score", 0.0)
-            if score > scores_by_name.get(name, 0.0):
+            raw_score = match.get("score", 0.0)
+            score = (2.0 * raw_score) - 1.0
+            if score > scores_by_name.get(name, -1.0):
                 scores_by_name[name] = score
 
         best_name = max(scores_by_name, key=scores_by_name.__getitem__)

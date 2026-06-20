@@ -6,8 +6,12 @@ RTSP processing loop (see ``app.api``).
 """
 
 import os
+import sys
 import subprocess
 import uvicorn
+
+# Add project root to sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import settings, logger
 

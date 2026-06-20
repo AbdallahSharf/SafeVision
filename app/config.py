@@ -20,6 +20,9 @@ load_dotenv()
 if "OPENCV_FFMPEG_LOGLEVEL" not in os.environ:
     os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "16"  # Show errors and fatals only
 
+if "OPENCV_FFMPEG_CAPTURE_OPTIONS" not in os.environ:
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -70,17 +73,17 @@ class Settings:
     RTSP_URL:  str = field(default_factory=lambda: _require_env("RTSP_URL"))
 
     # ── Model paths ───────────────────────────────────────────────────────
-    YOLO_MODEL_PATH:    str = os.environ.get("YOLO_MODEL_PATH",    "models/best.pt")
+    YOLO_MODEL_PATH:    str = os.environ.get("YOLO_MODEL_PATH",    "models/yolov8n-face.pt")
     ARCFACE_MODEL_PATH: str = os.environ.get("ARCFACE_MODEL_PATH", "models/w600k_r50.onnx")
 
     # ── Detection thresholds ──────────────────────────────────────────────
-    YOLO_CONF_THRESHOLD: float = float(os.environ.get("YOLO_CONF_THRESHOLD", "0.4"))
-    BOX_CONF_THRESHOLD:  float = float(os.environ.get("BOX_CONF_THRESHOLD",  "0.6"))
-    RECOG_THRESHOLD:     float = float(os.environ.get("RECOG_THRESHOLD",     "0.6"))
+    YOLO_CONF_THRESHOLD: float = float(os.environ.get("YOLO_CONF_THRESHOLD", "0.1"))
+    BOX_CONF_THRESHOLD:  float = float(os.environ.get("BOX_CONF_THRESHOLD",  "0.1"))
+    RECOG_THRESHOLD:     float = float(os.environ.get("RECOG_THRESHOLD",     "0.45"))
 
     # ── Frame / processing ────────────────────────────────────────────────
-    FRAME_WIDTH:   int   = int(os.environ.get("FRAME_WIDTH",   "800"))
-    FRAME_HEIGHT:  int   = int(os.environ.get("FRAME_HEIGHT",  "600"))
+    FRAME_WIDTH:   int   = int(os.environ.get("FRAME_WIDTH",   "640"))
+    FRAME_HEIGHT:  int   = int(os.environ.get("FRAME_HEIGHT",  "480"))
     FACE_SIZE:     int   = int(os.environ.get("FACE_SIZE",     "112"))
     FACE_MARGIN:   int   = int(os.environ.get("FACE_MARGIN",   "20"))
     IMGSZ:         int   = int(os.environ.get("IMGSZ",         "640"))
@@ -93,8 +96,10 @@ class Settings:
     DB_TOP_K:          int = int(os.environ.get("DB_TOP_K",          "5"))
 
     # ── Streaming ─────────────────────────────────────────────────────────
-    # JPEG quality for the MJPEG stream (65 = ~35% smaller than 80, indistinguishable for surveillance)
-    STREAM_JPEG_QUALITY: int = int(os.environ.get("STREAM_JPEG_QUALITY", "65"))
+    # JPEG quality for the MJPEG stream
+    STREAM_JPEG_QUALITY: int = int(os.environ.get("STREAM_JPEG_QUALITY", "70"))
+    # Target FPS for the MJPEG stream output (caps encoding rate to avoid wasted CPU)
+    TARGET_STREAM_FPS: int = int(os.environ.get("TARGET_STREAM_FPS", "15"))
 
     # ── Face quality gate ─────────────────────────────────────────────────
     # Laplacian variance below this value means the face crop is too blurry to recognise reliably.
@@ -102,10 +107,12 @@ class Settings:
     BLUR_THRESHOLD: float = float(os.environ.get("BLUR_THRESHOLD", "80.0"))
 
     # ── Frame skipping ────────────────────────────────────────────────────
-    # (Removed to ensure accurate tracking and maximize GPU utilization)
+    # Run YOLO every N-th frame; on skipped frames the tracker predicts positions
+    DETECT_EVERY_N_FRAMES: int = int(os.environ.get("DETECT_EVERY_N_FRAMES", "2"))
     
     # ── Low-light enhancement ─────────────────────────────────────────────
-    LOW_LIGHT_ENABLE:         bool  = os.environ.get("LOW_LIGHT_ENABLE", "true").lower() == "true"
+    # Low-light enhancement — disabled by default (costs 5ms CPU per face in bright rooms)
+    LOW_LIGHT_ENABLE:         bool  = os.environ.get("LOW_LIGHT_ENABLE", "false").lower() == "true"
     LOW_LIGHT_AUTO_THRESHOLD: int   = int(os.environ.get("LOW_LIGHT_AUTO_THRESHOLD", "80"))
     CLAHE_CLIP_LIMIT:         float = float(os.environ.get("CLAHE_CLIP_LIMIT",  "3.0"))
     CLAHE_TILE_SIZE:          int   = int(os.environ.get("CLAHE_TILE_SIZE",     "8"))

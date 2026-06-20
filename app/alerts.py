@@ -37,7 +37,8 @@ import os
 from datetime import datetime
 import numpy as np
 
-from app.database import async_alerts_collection
+from app.database import db
+alerts_collection = db["alerts"]
 
 # ---------------------------------------------------------------------------
 # Rate limiting — prevents alert spam for the same unauthorized person
@@ -46,11 +47,12 @@ _alert_cooldown_lock = threading.Lock()
 _last_alert_time: float = 0.0
 
 
-async def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray) -> None:
+def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray) -> None:
     """
     Send an FCM notification when an unauthorized face is detected and save the photo to the VM.
 
     Rate-limited: at most one alert per ALERT_COOLDOWN_SECONDS (default 60s).
+    Runs in a detached thread so it doesn't block the AI pipeline.
 
     Parameters
     ----------
@@ -75,30 +77,34 @@ async def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.n
             return
         _last_alert_time = now
 
-    # ── Save image to VM storage ───────────────────────────────────────
-    filename = ""
-    try:
-        # Create directory just in case it doesn't exist yet inside container
-        os.makedirs("/opt/safevision/unauthorized_faces", exist_ok=True)
-        
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"unauthorized_{timestamp_str}_{uuid.uuid4().hex[:8]}.jpg"
-        image_path = os.path.join("/opt/safevision/unauthorized_faces", filename)
-        
-        cv2.imwrite(image_path, face_img)
-        logger.info(f"Saved unauthorized face photo to {image_path}")
+    # Generate the unique filename in the parent scope so both the background
+    # thread and FCM notification payload can reference it.
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"unauthorized_{timestamp_str}_{uuid.uuid4().hex[:8]}.jpg"
 
-        # ── Save to Alerts Database ────────────────────────────────────────
-        alert_doc = {
-            "timestamp": datetime.now(),
-            "confidence": confidence,
-            "image_filename": filename,
-            "type": "unauthorized"
-        }
-        await async_alerts_collection.insert_one(alert_doc)
+    def _alert_task():
+        # ── Save image to VM storage ───────────────────────────────────────
+        try:
+            # Create directory just in case it doesn't exist yet inside container
+            os.makedirs("/opt/safevision/unauthorized_faces", exist_ok=True)
+            image_path = os.path.join("/opt/safevision/unauthorized_faces", filename)
+            
+            cv2.imwrite(image_path, face_img)
+            logger.info(f"Saved unauthorized face photo to {image_path}")
 
-    except Exception as exc:
-        logger.error(f"Failed to save unauthorized alert: {exc}")
+            # ── Save to Alerts Database ────────────────────────────────────────
+            alert_doc = {
+                "timestamp": datetime.now(),
+                "confidence": confidence,
+                "image_filename": filename,
+                "type": "unauthorized"
+            }
+            alerts_collection.insert_one(alert_doc)
+
+        except Exception as exc:
+            logger.error(f"Failed to save unauthorized alert: {exc}")
+
+    threading.Thread(target=_alert_task, daemon=True).start()
 
     if not _initialized or not settings.FCM_TOPIC:
         return
