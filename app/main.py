@@ -21,9 +21,10 @@ def main() -> None:
     if not os.path.exists(engine_path):
         logger.info("YOLO TensorRT engine not found. Building it now (this may take a few minutes)...")
         try:
-            subprocess.run(["python", "scripts/export_tensorrt.py"], check=True)
+            subprocess.run([sys.executable, "scripts/export_tensorrt.py"], check=True)
         except Exception as e:
             logger.error(f"Failed to build TensorRT engine: {e}")
+            logger.info("Continuing with PyTorch/ONNX backend instead.")
             
     logger.info(
         "Starting SafeVision API server on port %d …",

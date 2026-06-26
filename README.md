@@ -96,8 +96,8 @@ After ArcFace produces an embedding, we find the closest match using MongoDB Atl
 ### 🐳 Docker
 The entire application is containerized. The base image is `nvidia/cuda:12.2.0-runtime-ubuntu22.04` to support GPU inference. The image is stored in **Google Artifact Registry** (`me-west1-docker.pkg.dev`).
 
-### ☁️ Google Compute Engine (GCE) — me-west1-b (Tel Aviv)
-The cloud VM that runs the SafeVision Docker container. A GPU VM in **Tel Aviv** (`me-west1-b`) was chosen to minimize latency to the camera and end users. The VM uses an **NVIDIA Tesla T4** for GPU inference.
+### ☁️ Google Compute Engine (GCE) — me-west1-c (Tel Aviv)
+The cloud VM that runs the SafeVision Docker container. A GPU VM in **Tel Aviv** (`me-west1-c`) was chosen to minimize latency to the camera and end users. The VM uses an **NVIDIA Tesla T4** for GPU inference.
 
 ### 🔄 GitHub Actions — CI/CD
 On every push to `main`, the pipeline automatically:
@@ -289,7 +289,7 @@ curl http://localhost:8080/status
 
 ```bash
 gcloud compute instances create safevision-gpu-vm \
-    --zone=me-west1-b \
+    --zone=me-west1-c \
     --machine-type=n1-standard-4 \
     --accelerator=type=nvidia-tesla-t4,count=1 \
     --maintenance-policy=TERMINATE \
@@ -312,7 +312,7 @@ gcloud compute firewall-rules create allow-safevision \
 ### 3. Create the `.env` file on the VM
 
 ```bash
-gcloud compute ssh safevision-gpu-vm --zone=me-west1-b
+gcloud compute ssh safevision-gpu-vm --zone=me-west1-c
 
 sudo mkdir -p /opt/safevision/unauthorized_faces
 sudo nano /opt/safevision/.env
@@ -327,7 +327,7 @@ See the [Tailscale Setup](#-tailscale-vpn-setup) section below.
 
 Push to `main` — the CI/CD pipeline handles everything else automatically.
 
-> **Note:** Make sure your `GCE_VM_ZONE` GitHub secret is set to `me-west1-b`.
+> **Note:** Make sure your `GCE_VM_ZONE` GitHub secret is set to `me-west1-c`.
 
 ### 6. Access the stream
 
@@ -349,7 +349,7 @@ Auto-builds and pushes on every commit to `main`. Uses **Workload Identity Feder
 | `GCP_WIF_PROVIDER` | Workload Identity Provider resource name |
 | `GCP_SA_EMAIL` | Service account email |
 | `GCE_VM_NAME` | Compute Engine VM name (e.g. `safevision-gpu-vm`) |
-| `GCE_VM_ZONE` | VM zone — must be `me-west1-b` |
+| `GCE_VM_ZONE` | VM zone — must be `me-west1-c` |
 | `GCE_SSH_PRIVATE_KEY` | Private SSH key for connecting to the VM |
 
 > **Note:** The `.env` file (containing `MONGO_URI`, `RTSP_URL`, etc.) lives directly on the VM at `/opt/safevision/.env` and is **not** stored in GitHub. The deployment pipeline mounts it into the container at runtime.
@@ -379,7 +379,7 @@ Then go to the [Tailscale Admin Console](https://login.tailscale.com/admin/machi
 ### 3. Install Tailscale on the VM
 
 ```bash
-gcloud compute ssh safevision-gpu-vm --zone=me-west1-b --command="curl -fsSL https://tailscale.com/install.sh | sudo sh && sudo tailscale up --accept-routes"
+gcloud compute ssh safevision-gpu-vm --zone=me-west1-c --command="curl -fsSL https://tailscale.com/install.sh | sudo sh && sudo tailscale up --accept-routes"
 ```
 
 Open the auth URL it prints and log in with the **same account** as Step 1.
@@ -454,7 +454,7 @@ See [`.env.example`](.env.example) for all variables with descriptions.
 - **`/admin/reload-thresholds`**: Hot-reload calibrated thresholds after enrolling new faces — no restart required.
 
 ### v3.0 — GPU Migration & MJPEG Optimization
-- **Migrated to NVIDIA Tesla T4 GPU** on Google Cloud `me-west1-b` (Tel Aviv zone) for lower latency.
+- **Migrated to NVIDIA Tesla T4 GPU** on Google Cloud `me-west1-c` (Tel Aviv zone) for lower latency.
 - **Removed WebRTC entirely**: Stripped `aiortc` and all WebRTC code. Pure MJPEG `/stream` is the single video endpoint — simpler, faster, and universally compatible.
 - **Removed `aiortc` and `insightface`**: ArcFace now loaded directly via ONNX Runtime — no Cython compilation required. Eliminates fragile C++ build dependencies from the Docker image.
 - **Removed `DETECT_EVERY_N` frame-skipping**: YOLO now runs on every single frame for maximum tracking accuracy, enabled by GPU speed.
@@ -541,8 +541,8 @@ We conducted system-wide performance profiling to identify bottlenecks in the pi
 **Fix:** Added `lfs: true` to the checkout action in `.github/workflows/deploy.yml`.
 
 ### ❌ GitHub Action failed on VM SSH (wrong zone secret)
-**Cause:** `GCE_VM_ZONE` GitHub secret was still set to the old US zone (`us-central1-a`) after migrating the VM to Tel Aviv (`me-west1-b`).  
-**Fix:** Update the `GCE_VM_ZONE` secret to `me-west1-b` in GitHub Repository Settings → Secrets.
+**Cause:** `GCE_VM_ZONE` GitHub secret was still set to the old US zone (`us-central1-a`) after migrating the VM to Tel Aviv (`me-west1-c`).  
+**Fix:** Update the `GCE_VM_ZONE` secret to `me-west1-c` in GitHub Repository Settings → Secrets.
 
 ### ❌ Docker authentication failed during manual deployment
 **Cause:** VM's Docker daemon wasn't authenticated to the Artifact Registry.  

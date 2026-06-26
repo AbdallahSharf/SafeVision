@@ -1,9 +1,9 @@
 services:
   safevision:
     build: .
+    container_name: safevision
     env_file: .env
-    ports:
-      - "8080:8080"
+    network_mode: host
     restart: unless-stopped
     deploy:
       resources:
@@ -12,6 +12,8 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    volumes:
+      - ./unauthorized_faces:/opt/safevision/unauthorized_faces
     logging:
       driver: "json-file"
       options:

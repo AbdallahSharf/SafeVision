@@ -3,10 +3,13 @@ __pycache__/
 *.pyo
 *.log
 .env
+.env.example
 .git/
 .github/
 venv/
 .venv/
+test-env/
+venv2/
 *.egg-info/
 dist/
 build/
@@ -15,3 +18,4 @@ Thumbs.db
 safevision.log
 README.md
 LICENSE
+*.engine

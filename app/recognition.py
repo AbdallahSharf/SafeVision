@@ -125,12 +125,14 @@ def recognize_face(
     if _faiss_index.is_loaded:
         name, score = _faiss_index.search(
             embedding,
-            threshold=threshold or settings.RECOG_THRESHOLD,
+            threshold=threshold if threshold is not None else settings.RECOG_THRESHOLD,
             per_identity_thresholds=get_all_thresholds() if threshold is None else None,
             top_k=settings.DB_TOP_K,
         )
         if name is not None:
             return name, score
+        else:
+            return "Unauthorized", score
 
     # ── Tier 2: MongoDB Atlas $vectorSearch (network fallback) ───────────
     try:
@@ -186,7 +188,7 @@ def recognize_face(
 
     except Exception as exc:
         logger.error("MongoDB vector search error: %s", exc)
-        return "Error", 0.0
+        return "Unauthorized", 0.0
 
 from app.database import async_faces_collection
 
@@ -204,12 +206,14 @@ async def async_recognize_face(
     if _faiss_index.is_loaded:
         name, score = _faiss_index.search(
             embedding,
-            threshold=threshold or settings.RECOG_THRESHOLD,
+            threshold=threshold if threshold is not None else settings.RECOG_THRESHOLD,
             per_identity_thresholds=get_all_thresholds() if threshold is None else None,
             top_k=settings.DB_TOP_K,
         )
         if name is not None:
             return name, score
+        else:
+            return "Unauthorized", score
 
     # ── Tier 2: MongoDB Atlas $vectorSearch (async network fallback) ─────
     try:
@@ -261,4 +265,4 @@ async def async_recognize_face(
 
     except Exception as exc:
         logger.error("[Async] MongoDB vector search error: %s", exc)
-        return "Error", 0.0
+        return "Unauthorized", 0.0

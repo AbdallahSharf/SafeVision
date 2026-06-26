@@ -18,18 +18,20 @@ from app.config import settings
 logger = logging.getLogger("safevision")
 
 _initialized = False
+_init_lock = threading.Lock()
 
 def init_firebase():
     """Initialize the Firebase Admin SDK if credentials are provided."""
     global _initialized
-    if not _initialized and settings.FIREBASE_CREDENTIALS_PATH:
-        try:
-            cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
-            firebase_admin.initialize_app(cred)
-            _initialized = True
-            logger.info("Firebase Cloud Messaging initialized.")
-        except Exception as exc:
-            logger.error("Failed to initialize Firebase: %s", exc)
+    with _init_lock:
+        if not _initialized and settings.FIREBASE_CREDENTIALS_PATH:
+            try:
+                cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
+                firebase_admin.initialize_app(cred)
+                _initialized = True
+                logger.info("Firebase Cloud Messaging initialized.")
+            except Exception as exc:
+                logger.error("Failed to initialize Firebase: %s", exc)
 
 import cv2
 import uuid
@@ -86,8 +88,12 @@ def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray
         # ── Save image to VM storage ───────────────────────────────────────
         try:
             # Create directory just in case it doesn't exist yet inside container
-            os.makedirs("/opt/safevision/unauthorized_faces", exist_ok=True)
-            image_path = os.path.join("/opt/safevision/unauthorized_faces", filename)
+            _faces_dir = os.environ.get(
+                "UNAUTHORIZED_FACES_DIR",
+                "/opt/safevision/unauthorized_faces" if os.name != "nt" else os.path.join(os.getcwd(), "unauthorized_faces"),
+            )
+            os.makedirs(_faces_dir, exist_ok=True)
+            image_path = os.path.join(_faces_dir, filename)
             
             cv2.imwrite(image_path, face_img)
             logger.info(f"Saved unauthorized face photo to {image_path}")
@@ -104,26 +110,30 @@ def send_unauthorized_alert(confidence: float, bbox: tuple, face_img: np.ndarray
         except Exception as exc:
             logger.error(f"Failed to save unauthorized alert: {exc}")
 
-    threading.Thread(target=_alert_task, daemon=True).start()
+    def _send_fcm():
+        if not _initialized or not settings.FCM_TOPIC:
+            return
+        try:
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title="⚠️ Unauthorized Person Detected",
+                    body=f"Confidence: {confidence:.0%} — check the live stream.",
+                ),
+                data={
+                    "bbox": str(bbox),
+                    "confidence": str(confidence),
+                    "type": "unauthorized_access",
+                    "image_filename": filename
+                },
+                topic=settings.FCM_TOPIC,
+            )
+            messaging.send(message)
+            logger.info("FCM alert sent for unauthorized detection.")
+        except Exception as exc:
+            logger.warning("FCM alert failed: %s", exc)
 
-    if not _initialized or not settings.FCM_TOPIC:
-        return
-        
-    try:
-        message = messaging.Message(
-            notification=messaging.Notification(
-                title="⚠️ Unauthorized Person Detected",
-                body=f"Confidence: {confidence:.0%} — check the live stream.",
-            ),
-            data={
-                "bbox": str(bbox),
-                "confidence": str(confidence),
-                "type": "unauthorized_access",
-                "image_filename": filename
-            },
-            topic=settings.FCM_TOPIC,
-        )
-        messaging.send(message)
-        logger.info("FCM alert sent for unauthorized detection.")
-    except Exception as exc:
-        logger.warning("FCM alert failed: %s", exc)
+    def _combined_alert_task():
+        _alert_task()
+        _send_fcm()
+
+    threading.Thread(target=_combined_alert_task, daemon=True).start()

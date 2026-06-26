@@ -11,15 +11,29 @@ Two-level pipeline:
 
 import cv2
 import numpy as np
+import threading
 
 from app.config import settings
 
 # ---------------------------------------------------------------------------
 # CLAHE instance (reused across calls)
 # ---------------------------------------------------------------------------
-clahe = cv2.createCLAHE(
+_clahe = cv2.createCLAHE(
     clipLimit=settings.CLAHE_CLIP_LIMIT,
     tileGridSize=(settings.CLAHE_TILE_SIZE, settings.CLAHE_TILE_SIZE),
+)
+_clahe_lock = threading.Lock()
+
+
+def _apply_clahe(channel: np.ndarray) -> np.ndarray:
+    """Thread-safe CLAHE apply."""
+    with _clahe_lock:
+        return _clahe.apply(channel)
+
+# Precomputed Gamma Lookup Table (gamma=0.6) for fast shadow lifting
+_GAMMA_LUT = np.array(
+    [min(255, int((i / 255.0) ** (1.0 / 0.6) * 255)) for i in range(256)],
+    dtype=np.uint8,
 )
 
 
@@ -77,16 +91,11 @@ def enhance_frame(frame: np.ndarray) -> np.ndarray:
     # Step 2 — CLAHE on L channel of LAB (boosts contrast without blowing color)
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
     l_ch, a_ch, b_ch = cv2.split(lab)
-    l_ch = clahe.apply(l_ch)
+    l_ch = _apply_clahe(l_ch)
     frame = cv2.cvtColor(cv2.merge([l_ch, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
 
     # Step 3 — gamma correction to lift shadows (gamma=0.6 → brighter midtones)
-    inv_gamma = 1.0 / 0.6
-    lut = np.array(
-        [min(255, int((i / 255.0) ** inv_gamma * 255)) for i in range(256)],
-        dtype=np.uint8,
-    )
-    frame = cv2.LUT(frame, lut)
+    frame = cv2.LUT(frame, _GAMMA_LUT)
 
     return frame
 
@@ -105,7 +114,7 @@ def enhance_face(face: np.ndarray) -> np.ndarray:
 
     lab = cv2.cvtColor(face, cv2.COLOR_BGR2LAB)
     l_ch, a_ch, b_ch = cv2.split(lab)
-    l_ch = clahe.apply(l_ch)
+    l_ch = _apply_clahe(l_ch)
     face = cv2.cvtColor(cv2.merge([l_ch, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
 
     return face

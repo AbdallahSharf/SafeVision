@@ -40,6 +40,11 @@ ENV OPENCV_FFMPEG_LOGLEVEL=16
 # Expose CUDA libraries installed via pip to ONNX Runtime and TensorRT
 ENV LD_LIBRARY_PATH="/usr/local/lib/python3.11/site-packages/tensorrt_libs:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:${LD_LIBRARY_PATH}"
 
+# Run as non-root user for security
+RUN groupadd -r safevision && useradd -r -g safevision -d /opt/safevision safevision \
+    && chown -R safevision:safevision /opt/safevision
+USER safevision
+
 EXPOSE 8080
 
 # Health check — give models time to load on first run

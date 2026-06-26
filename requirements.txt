@@ -4,14 +4,17 @@ uvicorn==0.30.6
 
 # Computer vision
 ultralytics
-nvidia-modelopt[onnx]
-onnx_graphsurgeon --extra-index-url https://pypi.ngc.nvidia.com
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 pillow==10.4.0
 scikit-image>=0.21.0
 
-# Deep learning (CPU — switch to cu121 builds when GPU VM is ready)
+# NVIDIA model optimization (requires NGC index)
+--extra-index-url https://pypi.ngc.nvidia.com
+nvidia-modelopt[onnx]
+onnx_graphsurgeon
+
+# Deep learning (CPU — Docker overrides with GPU versions)
 torch==2.4.1
 torchvision==0.19.1
 onnxruntime==1.19.2
@@ -20,7 +23,7 @@ onnxruntime==1.19.2
 pymongo>=4.9.0
 motor==3.6.0
 
-# TensorRT / WebRTC
+# TensorRT
 tensorrt==10.0.1
 aiohttp>=3.9.5
 

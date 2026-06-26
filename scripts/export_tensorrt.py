@@ -1,10 +1,16 @@
 import os
+import sys
+
+# Add project root to path so we can import app.config
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from ultralytics import YOLO
-import tensorrt as trt
+from app.config import settings
+
 
 def export_models():
     print("Exporting YOLO to TensorRT...")
-    yolo_path = "models/best.pt"
+    yolo_path = settings.YOLO_MODEL_PATH
     if os.path.exists(yolo_path):
         engine_path = yolo_path.replace('.pt', '.engine')
         if os.path.exists(engine_path):

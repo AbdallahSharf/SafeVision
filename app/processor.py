@@ -241,11 +241,13 @@ class FrameProcessor:
         return self._fps
 
     def get_recent_faces(self, limit: int = 10) -> List[dict]:
+        items = list(self._recent_faces)
+        # Return only the most recent `limit` entries
         return [
             {
                 "name": f.name,
                 "confidence": f.confidence,
                 "bbox": f.bbox,
             }
-            for f in list(self._recent_faces)
+            for f in items[-limit:]
         ]

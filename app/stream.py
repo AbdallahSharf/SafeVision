@@ -59,7 +59,7 @@ class VideoStream:
         """Open the RTSP stream with TCP transport (set via env var above)."""
         # FFMPEG optimizations for ultra-low latency RTSP/HTTP
         # stimeout and timeout set to 5000000 (5 seconds in microseconds) prevent infinite hanging when Wi-Fi completely dies.
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|recv_buffer_size;65536|stimeout;5000000|timeout;5000000"
+        # OPENCV_FFMPEG_CAPTURE_OPTIONS is now set centrally in config.py
         cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         # Keep only 1 decoded frame in OpenCV's internal ring-buffer.
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

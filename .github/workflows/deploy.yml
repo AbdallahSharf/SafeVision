@@ -74,7 +74,6 @@ jobs:
         run: |
           FULL_IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}"
           docker build \
-            --build-arg GCS_MODELS_BUCKET="${{ secrets.GCS_MODELS_BUCKET }}" \
             -t "${FULL_IMAGE}:${{ github.sha }}" \
             -t "${FULL_IMAGE}:latest" \
             .
@@ -114,7 +113,7 @@ jobs:
               docker system prune -af
               docker pull \"${FULL_IMAGE}\"
               sudo mkdir -p /opt/safevision/unauthorized_faces
-              sudo chmod 777 /opt/safevision/unauthorized_faces
+              sudo chmod 775 /opt/safevision/unauthorized_faces
               docker run -d \
                 --name safevision \
                 --restart unless-stopped \

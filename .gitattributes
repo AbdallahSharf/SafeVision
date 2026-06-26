@@ -1,3 +1,10 @@
+# Normalize line endings across platforms
+* text=auto
+
+# Force LF for shell scripts (must run on Linux/Docker)
+*.sh text eol=lf
+Dockerfile text eol=lf
+
 # Models are stored in Google Cloud Storage, NOT fetched via Git LFS.
 # The workflow downloads them with gsutil at Docker build time.
 # LFS tracking is intentionally disabled to avoid LFS bandwidth quota issues.

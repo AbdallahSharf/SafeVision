@@ -22,7 +22,7 @@ REPO="safevision"
 IMAGE="safevision"
 TAG="${1:-latest}"
 VM_NAME="${GCE_VM_NAME:-safevision-vm}"
-VM_ZONE="${GCE_VM_ZONE:-me-west1-a}"
+VM_ZONE="${GCE_VM_ZONE:-me-west1-c}"
 
 FULL_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE}:${TAG}"
 
@@ -46,12 +46,19 @@ gcloud compute ssh "${VM_NAME}" \
         # Stop old container (if running)
         docker stop safevision 2>/dev/null || true
         docker rm safevision 2>/dev/null || true
+        docker system prune -af
+
+        # Ensure unauthorized faces directory exists
+        sudo mkdir -p /opt/safevision/unauthorized_faces
+        sudo chmod 775 /opt/safevision/unauthorized_faces
 
         # Start new container
         docker run -d \
             --name safevision \
             --restart unless-stopped \
-            -p 8080:8080 \
+            --network host \
+            --gpus all \
+            -v /opt/safevision/unauthorized_faces:/opt/safevision/unauthorized_faces \
             --env-file /opt/safevision/.env \
             ${FULL_IMAGE}
 

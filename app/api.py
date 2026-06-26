@@ -42,7 +42,6 @@ import time
 from contextlib import asynccontextmanager
 
 import os
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|recv_buffer_size;65536|stimeout;5000000|timeout;5000000"
 
 import cv2
 import numpy as np
@@ -258,7 +257,10 @@ def _faiss_sync_loop() -> None:
             
             # Clean up unauthorized faces older than 7 days
             try:
-                faces_dir = "/opt/safevision/unauthorized_faces"
+                faces_dir = os.environ.get(
+                    "UNAUTHORIZED_FACES_DIR",
+                    "/opt/safevision/unauthorized_faces" if os.name != "nt" else os.path.join(os.getcwd(), "unauthorized_faces"),
+                )
                 if os.path.exists(faces_dir):
                     now_time = time.time()
                     deleted_count = 0
@@ -339,10 +341,12 @@ app = FastAPI(
 )
 
 # Allow mobile apps to connect from any origin
+# Note: allow_credentials is disabled with wildcard origins for security.
+# For production, replace "*" with your specific frontend domain(s).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -446,7 +450,7 @@ async def health():
 
 
 @app.get("/status", tags=["monitoring"])
-async def status():
+async def system_status():
     """Detailed system status."""
     face_count = faces_collection.count_documents({})
     
@@ -489,6 +493,7 @@ async def status():
 @app.get("/faces", tags=["recognition"], dependencies=[Depends(verify_token)])
 async def recent_faces(limit: int = 20):
     """Return the most recently recognised faces."""
+    limit = max(1, min(limit, 100))  # clamp to [1, 100]
     if _processor is None:
         return {"faces": []}
     return {"faces": _processor.get_recent_faces(limit=limit)}
@@ -499,12 +504,19 @@ import os
 from app.database import async_alerts_collection
 
 # Create image directory if it doesn't exist
-os.makedirs("/opt/safevision/unauthorized_faces", exist_ok=True)
-app.mount("/images", StaticFiles(directory="/opt/safevision/unauthorized_faces"), name="images")
+_UNAUTHORIZED_FACES_DIR = os.environ.get(
+    "UNAUTHORIZED_FACES_DIR",
+    os.path.join(os.getcwd(), "unauthorized_faces")
+    if os.name == "nt"
+    else "/opt/safevision/unauthorized_faces",
+)
+os.makedirs(_UNAUTHORIZED_FACES_DIR, exist_ok=True)
+app.mount("/images", StaticFiles(directory=_UNAUTHORIZED_FACES_DIR), name="images")
 
 @app.get("/alerts", tags=["monitoring"], dependencies=[Depends(verify_token)])
 async def get_alerts(limit: int = 20):
     """Return the most recent unauthorized access alerts for the mobile app history view."""
+    limit = max(1, min(limit, 100))  # clamp to [1, 100]
     cursor = async_alerts_collection.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit)
     alerts = await cursor.to_list(length=limit)
     return {"alerts": alerts}

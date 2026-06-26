@@ -21,7 +21,10 @@ if "OPENCV_FFMPEG_LOGLEVEL" not in os.environ:
     os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "16"  # Show errors and fatals only
 
 if "OPENCV_FFMPEG_CAPTURE_OPTIONS" not in os.environ:
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+        "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
+        "|recv_buffer_size;65536|stimeout;5000000|timeout;5000000"
+    )
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -57,10 +60,7 @@ class Settings:
     """Typed, validated application settings — instantiated once at startup."""
 
     # ── Database ──────────────────────────────────────────────────────────
-    MONGO_URI: str = os.environ.get(
-        "MONGO_URI",
-        "mongodb+srv://admin:pass@cluster.mongodb.net/test?retryWrites=true&w=majority",
-    )
+    MONGO_URI: str = field(default_factory=lambda: _require_env("MONGO_URI"))
 
     # ── Security & Alerts ─────────────────────────────────────────────────
     API_SECRET_KEY: str = os.environ.get("API_SECRET_KEY", "")
@@ -73,12 +73,12 @@ class Settings:
     RTSP_URL:  str = field(default_factory=lambda: _require_env("RTSP_URL"))
 
     # ── Model paths ───────────────────────────────────────────────────────
-    YOLO_MODEL_PATH:    str = os.environ.get("YOLO_MODEL_PATH",    "models/yolov8n-face.pt")
+    YOLO_MODEL_PATH:    str = os.environ.get("YOLO_MODEL_PATH",    "models/best.pt")
     ARCFACE_MODEL_PATH: str = os.environ.get("ARCFACE_MODEL_PATH", "models/w600k_r50.onnx")
 
     # ── Detection thresholds ──────────────────────────────────────────────
-    YOLO_CONF_THRESHOLD: float = float(os.environ.get("YOLO_CONF_THRESHOLD", "0.1"))
-    BOX_CONF_THRESHOLD:  float = float(os.environ.get("BOX_CONF_THRESHOLD",  "0.1"))
+    YOLO_CONF_THRESHOLD: float = float(os.environ.get("YOLO_CONF_THRESHOLD", "0.4"))
+    BOX_CONF_THRESHOLD:  float = float(os.environ.get("BOX_CONF_THRESHOLD",  "0.4"))
     RECOG_THRESHOLD:     float = float(os.environ.get("RECOG_THRESHOLD",     "0.45"))
 
     # ── Frame / processing ────────────────────────────────────────────────

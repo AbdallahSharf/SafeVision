@@ -31,4 +31,13 @@ Thumbs.db
 # Do NOT commit .pt / .onnx / .engine — they caused Git LFS quota failures
 models/*.pt
 models/*.onnx
-models/*.engine
+models/*.engine
+
+# Firebase credentials (NEVER commit)
+*-firebase-adminsdk-*.json
+serviceAccountKey.json
+
+# Secret keys and certificates
+*.pem
+*.key
+*.secret
